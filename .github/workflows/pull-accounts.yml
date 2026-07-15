@@ -15,9 +15,10 @@ jobs:
       - run: python ch_accounts_puller.py input.csv
         env:
           CH_API_KEY: ${{ secrets.CH_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       - uses: actions/upload-artifact@v4
         with:
           name: triage-results
           path: |
-            triage_report.csv
+            call_sheet.csv
             accounts/
