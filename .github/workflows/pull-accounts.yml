@@ -10,10 +10,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests pdfplumber
-      - run: 'echo "key length: ${#CH_API_KEY}" && curl -s -o /dev/null -w "auth check: %{http_code}\n" -u "$CH_API_KEY:" "https://api.company-information.service.gov.uk/search/companies?q=test"'
-        env:
-          CH_API_KEY: ${{ secrets.CH_API_KEY }}
+      - run: sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils
+      - run: pip install requests pdfplumber pdf2image pytesseract beautifulsoup4
       - run: python ch_accounts_puller.py input.csv
         env:
           CH_API_KEY: ${{ secrets.CH_API_KEY }}
