@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Companies House bulk accounts puller + FX triage scanner (v2, OCR-capable)."""
+"""Companies House bulk accounts puller + FX triage + AI call briefs (v3)."""
 
 import csv
-import io
+import json
 import os
 import re
 import sys
@@ -30,14 +30,16 @@ try:
 except ImportError:
     HAS_BS = False
 
-API_KEY = os.environ.get("CH_API_KEY", "PASTE_KEY_HERE")
+API_KEY = os.environ.get("CH_API_KEY", "")
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 BASE = "https://api.company-information.service.gov.uk"
 DOC_BASE = "https://document-api.company-information.service.gov.uk"
+CLAUDE_MODEL = "claude-haiku-4-5"
 
 OUT_DIR = Path("accounts")
 OUT_DIR.mkdir(exist_ok=True)
-
-MAX_OCR_PAGES = 35  # cap OCR effort per document
+MAX_OCR_PAGES = 35
+MAX_BRIEF_CHARS = 120_000  # cap text sent to the API
 
 PATTERNS = [
     (r"forward (foreign )?(currency|exchange) contract", "FORWARD CONTRACTS - active hedger", 10),
@@ -61,7 +63,7 @@ def rate_limited_get(url, **kw):
     for attempt in range(4):
         try:
             r = session.get(url, timeout=60, **kw)
-        except requests.RequestException as e:
+        except requests.RequestException:
             if attempt == 3:
                 raise
             time.sleep(5 * (attempt + 1))
@@ -96,21 +98,19 @@ def latest_accounts_filing(number):
 
 
 def get_document(doc_metadata_url, dest_stem: Path):
-    """Prefer xhtml (pure text). Fall back to PDF. Returns (kind, path_or_text, err)."""
     doc_id = doc_metadata_url.rstrip("/").split("/")[-1]
     meta = rate_limited_get(f"{DOC_BASE}/document/{doc_id}")
-    formats = {}
-    if meta.status_code == 200:
-        formats = meta.json().get("resources", {})
+    formats = meta.json().get("resources", {}) if meta.status_code == 200 else {}
 
     if "application/xhtml+xml" in formats:
         r = rate_limited_get(f"{DOC_BASE}/document/{doc_id}/content",
                              headers={"Accept": "application/xhtml+xml"},
                              allow_redirects=True)
         if r.status_code == 200:
+            r.encoding = "utf-8"
             return "xhtml", r.text, None
 
-    for attempt in range(2):
+    for _ in range(2):
         r = rate_limited_get(f"{DOC_BASE}/document/{doc_id}/content",
                              headers={"Accept": "application/pdf"},
                              allow_redirects=True)
@@ -119,7 +119,7 @@ def get_document(doc_metadata_url, dest_stem: Path):
             dest.write_bytes(r.content)
             expected = int(r.headers.get("Content-Length", 0))
             if expected and dest.stat().st_size < expected:
-                continue  # truncated, retry
+                continue
             return "pdf", dest, None
     return None, None, f"document fetch failed ({r.status_code})"
 
@@ -130,8 +130,7 @@ def text_from_xhtml(xhtml: str) -> str:
     return re.sub(r"<[^>]+>", " ", xhtml)
 
 
-def text_from_pdf(path: Path) -> tuple[str, str]:
-    """Returns (text, method). Tries text layer, then OCR."""
+def text_from_pdf(path: Path):
     text = ""
     if HAS_PDF:
         try:
@@ -142,15 +141,12 @@ def text_from_pdf(path: Path) -> tuple[str, str]:
             text = ""
     if len(text.strip()) >= 200:
         return text, "text-layer"
-
     if HAS_OCR:
         try:
             images = convert_from_path(path, dpi=200, last_page=MAX_OCR_PAGES)
-            ocr_text = ""
-            for img in images:
-                ocr_text += pytesseract.image_to_string(img) + "\n"
-            if len(ocr_text.strip()) >= 200:
-                return ocr_text, "ocr"
+            ocr = "".join(pytesseract.image_to_string(img) + "\n" for img in images)
+            if len(ocr.strip()) >= 200:
+                return ocr, "ocr"
         except Exception as e:
             return "", f"ocr failed: {e}"
     return "", "no text"
@@ -165,9 +161,7 @@ def scan_text(text: str):
             score += weight
             findings.append(f"{label} (x{len(matches)})")
             m = matches[0]
-            start = max(0, m.start() - 120)
-            end = min(len(text), m.end() + 160)
-            excerpts.append(" ".join(text[start:end].split()))
+            excerpts.append(" ".join(text[max(0, m.start()-120):m.end()+160].split()))
     turnover = ""
     m = re.search(r"turnover[^\d£$€]{0,40}[£$€]?\s?([\d,]{6,})", lower)
     if m:
@@ -175,21 +169,67 @@ def scan_text(text: str):
     return score, findings, excerpts, turnover
 
 
+def ai_brief(company_name: str, accounts_text: str, score: int, findings: list):
+    """Ask Claude for a call brief. Returns dict or None."""
+    if not ANTHROPIC_KEY:
+        return None
+    prompt = f"""You are preparing a cold-call battle card for an FX brokerage salesperson at Lumon (UK, sells FX risk management: forwards, options, no-deposit facilities, dedicated dealers).
+
+Below is the text of the latest filed statutory accounts for {company_name}. Regex pre-scan score: {score}. Signals found: {', '.join(findings) if findings else 'none'}.
+
+Return ONLY a JSON object, no markdown, with exactly these keys:
+- "one_liner": what the company does, one sentence, plain English
+- "fx_summary": their FX exposure and how they currently manage it, 1-2 sentences, cite figures from the accounts where present
+- "triggers": recent events from the business review worth referencing on a call (fires, acquisitions, new divisions, growth, restructuring, new markets), 1-2 sentences, or "none found"
+- "sophistication": "hedger" (uses forwards/derivatives), "exposed-unhedged" (has FX, no hedging evident), "minimal" (little/no FX), or "unclear"
+- "angle": the single best opening angle for the call in one sentence, matched to sophistication: hedgers get benchmarking/fixed-spread/margin-certainty language, never missed-upside talk; exposed-unhedged get margin-protection framing; cash-tight companies get no-deposit forwards
+- "red_flags": anything suggesting caution (insolvency risk, restricted sectors like firearms/cannabis/adult/radioactive, tiny scale), or "none"
+
+ACCOUNTS TEXT:
+{accounts_text[:MAX_BRIEF_CHARS]}"""
+
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": CLAUDE_MODEL,
+                "max_tokens": 800,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=120,
+        )
+        if r.status_code != 200:
+            return {"error": f"api {r.status_code}: {r.text[:200]}"}
+        blocks = r.json().get("content", [])
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        text = re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.M).strip()
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"error": "unparseable AI response", "raw": text[:300]}
+    except Exception as e:
+        return {"error": f"api call failed: {e}"}
+
+
 def main(input_csv):
     rows_out = []
     with open(input_csv, newline="", encoding="utf-8-sig") as f:
         inputs = list(csv.DictReader(f))
-
-    print(f"Processing {len(inputs)} companies...\n")
+    print(f"Processing {len(inputs)} companies... (AI briefs: {'ON' if ANTHROPIC_KEY else 'OFF, no ANTHROPIC_API_KEY'})\n")
 
     for i, row in enumerate(inputs, 1):
         row = {k.lower().strip(): (v or "").strip() for k, v in row.items()}
         name_in, number = row.get("name", ""), row.get("number", "")
         print(f"[{i}/{len(inputs)}] {name_in or number}")
 
-        result = {"input_name": name_in, "company_number": number, "matched_name": "",
-                  "status": "", "accounts_date": "", "accounts_type": "", "read_method": "",
-                  "fx_score": "", "findings": "", "turnover_guess": "", "excerpts": "",
+        result = {"company": name_in, "number": number, "matched_name": "", "score": "",
+                  "sophistication": "", "one_liner": "", "fx_summary": "", "triggers": "",
+                  "angle": "", "red_flags": "", "turnover": "", "accounts_date": "",
+                  "accounts_type": "", "read_method": "", "findings": "", "excerpts": "",
                   "pdf_path": "", "error": ""}
         try:
             if not number:
@@ -197,10 +237,10 @@ def main(input_csv):
                 if err:
                     result["error"] = err; rows_out.append(result); print(f"    SKIP: {err}"); continue
                 number = match["company_number"]
-                result.update(company_number=number, matched_name=match.get("title", ""),
-                              status=match.get("company_status", ""))
-                if result["status"] not in ("active", ""):
-                    result["error"] = f"status: {result['status']}"
+                result["number"] = number
+                result["matched_name"] = match.get("title", "")
+                if match.get("company_status") not in ("active", "", None):
+                    result["error"] = f"status: {match.get('company_status')}"
                     rows_out.append(result); print("    SKIP: not active"); continue
 
             filing, err = latest_accounts_filing(number)
@@ -215,21 +255,28 @@ def main(input_csv):
                 result["error"] = err; rows_out.append(result); print(f"    SKIP: {err}"); continue
 
             if kind == "xhtml":
-                text = text_from_xhtml(payload)
-                result["read_method"] = "xhtml"
+                text, result["read_method"] = text_from_xhtml(payload), "xhtml"
             else:
                 result["pdf_path"] = str(payload)
-                text, method = text_from_pdf(payload)
-                result["read_method"] = method
+                text, result["read_method"] = text_from_pdf(payload)
 
             if not text:
                 result["error"] = "no readable text"
                 rows_out.append(result); print("    SKIP: unreadable"); continue
 
             score, findings, excerpts, turnover = scan_text(text)
-            result.update(fx_score=score, findings=" | ".join(findings),
-                          excerpts=" || ".join(excerpts[:4]), turnover_guess=turnover)
-            print(f"    OK: score {score} via {result['read_method']}")
+            result.update(score=score, findings=" | ".join(findings),
+                          excerpts=" || ".join(excerpts[:4]), turnover=turnover)
+
+            brief = ai_brief(result["matched_name"] or name_in, text, score, findings)
+            if brief:
+                if "error" in brief:
+                    result["error"] = f"brief: {brief['error']}"
+                else:
+                    for k in ("one_liner", "fx_summary", "triggers", "sophistication", "angle", "red_flags"):
+                        result[k] = brief.get(k, "")
+            print(f"    OK: score {score} via {result['read_method']}"
+                  + (f", brief done" if brief and "error" not in (brief or {}) else ""))
 
         except Exception as e:
             result["error"] = f"unexpected: {e}"
@@ -237,16 +284,16 @@ def main(input_csv):
         rows_out.append(result)
         time.sleep(0.6)
 
-    rows_out.sort(key=lambda r: (isinstance(r["fx_score"], int), r["fx_score"] or 0), reverse=True)
-    with open("triage_report.csv", "w", newline="", encoding="utf-8") as f:
+    rows_out.sort(key=lambda r: (isinstance(r["score"], int), r["score"] or 0), reverse=True)
+    with open("call_sheet.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows_out[0].keys()))
         w.writeheader(); w.writerows(rows_out)
-    print(f"\nDone. {len(rows_out)} rows -> triage_report.csv")
+    print(f"\nDone. {len(rows_out)} rows -> call_sheet.csv (sorted by score)")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(__doc__); sys.exit(1)
-    if API_KEY == "PASTE_KEY_HERE":
+    if not API_KEY:
         print("Set CH_API_KEY first"); sys.exit(1)
     main(sys.argv[1])
