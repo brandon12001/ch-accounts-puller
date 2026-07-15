@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Companies House bulk accounts puller + FX triage + AI call briefs (v3)."""
+"""Companies House bulk accounts puller + FX triage + AI call briefs (v3.1, trimmed briefs)."""
 
 import csv
 import json
@@ -32,6 +32,8 @@ except ImportError:
 
 API_KEY = os.environ.get("CH_API_KEY", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GSHEET_CREDS = os.environ.get("GSHEET_CREDENTIALS", "")
+GSHEET_ID = os.environ.get("GSHEET_ID", "")
 BASE = "https://api.company-information.service.gov.uk"
 DOC_BASE = "https://document-api.company-information.service.gov.uk"
 CLAUDE_MODEL = "claude-haiku-4-5"
@@ -39,7 +41,6 @@ CLAUDE_MODEL = "claude-haiku-4-5"
 OUT_DIR = Path("accounts")
 OUT_DIR.mkdir(exist_ok=True)
 MAX_OCR_PAGES = 35
-MAX_BRIEF_CHARS = 120_000  # cap text sent to the API
 
 PATTERNS = [
     (r"forward (foreign )?(currency|exchange) contract", "FORWARD CONTRACTS - active hedger", 10),
@@ -169,24 +170,45 @@ def scan_text(text: str):
     return score, findings, excerpts, turnover
 
 
+KEEP_WORDS = re.compile(
+    r"currenc|foreign exchange|hedg|forward|derivativ|exchange rate|import|export|"
+    r"overseas|international|turnover|revenue|principal activit|strategic|review of|"
+    r"borrow|overdraft|invoice discount|loan|creditor|going concern|acqui|fire|"
+    r"restructur|expansion|new (division|market|site|facility)|risk",
+    re.I,
+)
+
+
+def trim_for_brief(text: str, head_chars: int = 6000, cap_chars: int = 28000) -> str:
+    """Keep the opening pages plus only FX/finance-relevant paragraphs."""
+    head = text[:head_chars]
+    kept = []
+    for para in re.split(r"\n\s*\n|(?<=\.)\s{2,}", text[head_chars:]):
+        p = para.strip()
+        if len(p) > 40 and KEEP_WORDS.search(p):
+            kept.append(" ".join(p.split()))
+    body = "\n".join(kept)
+    return (head + "\n---\n" + body)[:cap_chars]
+
+
 def ai_brief(company_name: str, accounts_text: str, score: int, findings: list):
     """Ask Claude for a call brief. Returns dict or None."""
     if not ANTHROPIC_KEY:
         return None
     prompt = f"""You are preparing a cold-call battle card for an FX brokerage salesperson at Lumon (UK, sells FX risk management: forwards, options, no-deposit facilities, dedicated dealers).
 
-Below is the text of the latest filed statutory accounts for {company_name}. Regex pre-scan score: {score}. Signals found: {', '.join(findings) if findings else 'none'}.
+Below is extracted text from the latest filed statutory accounts for {company_name}. Regex pre-scan score: {score}. Signals found: {', '.join(findings) if findings else 'none'}.
 
 Return ONLY a JSON object, no markdown, with exactly these keys:
 - "one_liner": what the company does, one sentence, plain English
 - "fx_summary": their FX exposure and how they currently manage it, 1-2 sentences, cite figures from the accounts where present
 - "triggers": recent events from the business review worth referencing on a call (fires, acquisitions, new divisions, growth, restructuring, new markets), 1-2 sentences, or "none found"
 - "sophistication": "hedger" (uses forwards/derivatives), "exposed-unhedged" (has FX, no hedging evident), "minimal" (little/no FX), or "unclear"
-- "angle": the single best opening angle for the call in one sentence, matched to sophistication: hedgers get benchmarking/fixed-spread/margin-certainty language, never missed-upside talk; exposed-unhedged get margin-protection framing; cash-tight companies get no-deposit forwards
+- "angle": the single best opening angle for the call in one sentence, matched to sophistication: hedgers get benchmarking/fixed-spread/margin-certainty language, never missed-upside talk; exposed-unhedged get margin-protection framing; cash-tight companies get no-deposit forwards. If sophistication is "minimal" or the accounts state minimal FX exposure, say exactly "DO NOT PURSUE - no meaningful FX exposure" instead of inventing an angle
 - "red_flags": anything suggesting caution (insolvency risk, restricted sectors like firearms/cannabis/adult/radioactive, tiny scale), or "none"
 
 ACCOUNTS TEXT:
-{accounts_text[:MAX_BRIEF_CHARS]}"""
+{trim_for_brief(accounts_text)}"""
 
     try:
         r = requests.post(
@@ -213,6 +235,31 @@ ACCOUNTS TEXT:
         return {"error": "unparseable AI response", "raw": text[:300]}
     except Exception as e:
         return {"error": f"api call failed: {e}"}
+
+
+def push_to_gsheet(rows):
+    """Write results to a new dated tab in the Google Sheet."""
+    if not (GSHEET_CREDS and GSHEET_ID):
+        print("Google Sheet push skipped (no credentials).")
+        return
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds = Credentials.from_service_account_info(
+            json.loads(GSHEET_CREDS),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(GSHEET_ID)
+        tab_name = time.strftime("run_%d-%m-%Y_%H%M")
+        headers = list(rows[0].keys())
+        ws = sh.add_worksheet(title=tab_name, rows=len(rows) + 5, cols=len(headers))
+        data = [headers] + [[str(r.get(h, "")) for h in headers] for r in rows]
+        ws.update(data)
+        ws.freeze(rows=1)
+        print(f"Pushed {len(rows)} rows to Google Sheet tab '{tab_name}'")
+    except Exception as e:
+        print(f"Google Sheet push failed: {e}")
 
 
 def main(input_csv):
@@ -276,7 +323,7 @@ def main(input_csv):
                     for k in ("one_liner", "fx_summary", "triggers", "sophistication", "angle", "red_flags"):
                         result[k] = brief.get(k, "")
             print(f"    OK: score {score} via {result['read_method']}"
-                  + (f", brief done" if brief and "error" not in (brief or {}) else ""))
+                  + (", brief done" if brief and "error" not in (brief or {}) else ""))
 
         except Exception as e:
             result["error"] = f"unexpected: {e}"
@@ -285,10 +332,11 @@ def main(input_csv):
         time.sleep(0.6)
 
     rows_out.sort(key=lambda r: (isinstance(r["score"], int), r["score"] or 0), reverse=True)
-    with open("call_sheet.csv", "w", newline="", encoding="utf-8") as f:
+    with open("call_sheet.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=list(rows_out[0].keys()))
         w.writeheader(); w.writerows(rows_out)
     print(f"\nDone. {len(rows_out)} rows -> call_sheet.csv (sorted by score)")
+    push_to_gsheet(rows_out)
 
 
 if __name__ == "__main__":
