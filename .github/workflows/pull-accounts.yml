@@ -1,0 +1,22 @@
+name: Pull accounts and triage
+on:
+  workflow_dispatch:
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests pdfplumber
+      - run: python ch_accounts_puller.py input.csv
+        env:
+          CH_API_KEY: ${{ secrets.CH_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: triage-results
+          path: |
+            triage_report.csv
+            accounts/
