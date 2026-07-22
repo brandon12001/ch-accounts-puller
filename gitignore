@@ -1,0 +1,14 @@
+# downloaded accounts + rendered artifacts
+accounts/
+*.pdf
+call_sheet*.csv
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# secrets - never commit keys
+.env
+*.env
