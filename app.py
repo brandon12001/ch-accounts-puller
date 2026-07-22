@@ -13,13 +13,43 @@ Three tabs:
 Requires env vars: CH_API_KEY, ANTHROPIC_API_KEY (briefs off without it).
 """
 import io
+import os
 import time
 import pandas as pd
 import streamlit as st
 
+# ---- Streamlit Cloud secrets -> environment (must happen BEFORE importing engine) ----
+# On Streamlit Cloud, keys live in the app's Secrets box. Locally, env vars still work.
+for _k in ("CH_API_KEY", "ANTHROPIC_API_KEY", "APP_PASSWORD"):
+    try:
+        if _k in st.secrets and st.secrets[_k]:
+            os.environ[_k] = str(st.secrets[_k])
+    except Exception:
+        pass  # no secrets file locally - env vars apply
+
 import ch_engine as eng
 
 st.set_page_config(page_title="FX Prospecting - CH Triage", layout="wide")
+
+# ---- password gate ----
+def check_password():
+    required = os.environ.get("APP_PASSWORD", "")
+    if not required:
+        return True  # no password configured (local use)
+    if st.session_state.get("auth_ok"):
+        return True
+    st.title("FX Prospecting — sign in")
+    pw = st.text_input("Password", type="password")
+    if st.button("Enter"):
+        if pw == required:
+            st.session_state.auth_ok = True
+            st.rerun()
+        else:
+            st.error("Wrong password.")
+    return False
+
+if not check_password():
+    st.stop()
 
 # ---- session state ----
 if "results" not in st.session_state:
@@ -46,8 +76,9 @@ def add_result(res: dict):
 
 
 def keys_present():
-    ok = bool(eng.API_KEY)
-    brief = bool(eng.ANTHROPIC_KEY)
+    import os as _os
+    ok = bool(_os.environ.get("CH_API_KEY", ""))
+    brief = bool(_os.environ.get("ANTHROPIC_API_KEY", ""))
     return ok, brief
 
 
