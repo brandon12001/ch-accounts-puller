@@ -38,8 +38,15 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-API_KEY = os.environ.get("CH_API_KEY", "")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+def _ch_key():
+    return os.environ.get("CH_API_KEY", "")
+
+def _anthropic_key():
+    return os.environ.get("ANTHROPIC_API_KEY", "")
+
+# Back-compat module-level values (read at import; prefer the functions above)
+API_KEY = _ch_key()
+ANTHROPIC_KEY = _anthropic_key()
 BASE = "https://api.company-information.service.gov.uk"
 DOC_BASE = "https://document-api.company-information.service.gov.uk"
 CLAUDE_MODEL = "claude-haiku-4-5"
@@ -66,13 +73,14 @@ PATTERNS = [
 ]
 
 session = requests.Session()
-session.auth = (API_KEY, "")
+session.auth = (_ch_key(), "")
 
 
 # ---------------------------------------------------------------------------
 # HTTP helper
 # ---------------------------------------------------------------------------
 def rate_limited_get(url, **kw):
+    session.auth = (_ch_key(), "")   # refresh in case secrets loaded after import
     r = None
     for attempt in range(4):
         try:
@@ -102,10 +110,16 @@ _SUFFIX_NOISE = re.compile(
 def normalise_name(name: str) -> str:
     """Lowercase, strip legal suffixes / common noise / punctuation, collapse spaces."""
     n = name.lower()
+    n = n.replace("&", " and ")             # Food & Drinks == Food and Drinks
     n = re.sub(r"[^\w\s]", " ", n)          # drop punctuation
     n = _SUFFIX_NOISE.sub(" ", n)           # drop Ltd/Limited/Group/etc
     n = re.sub(r"\s+", " ", n).strip()
     return n
+
+
+def _collapsed(name: str) -> str:
+    """Normalised name with ALL spaces removed: fever tree -> fevertree."""
+    return normalise_name(name).replace(" ", "")
 
 
 def _token_set(name: str) -> set:
@@ -128,6 +142,10 @@ def match_confidence(query: str, candidate_title: str) -> tuple[str, float, str]
 
     if q_norm == c_norm:
         return "exact", 1.0, "exact match after normalising suffixes"
+
+    # Fever-Tree vs FEVERTREE: identical once all spaces/hyphens collapse
+    if _collapsed(query) and _collapsed(query) == _collapsed(candidate_title):
+        return "exact", 1.0, "exact match after collapsing spaces/hyphens"
 
     q_tokens, c_tokens = _token_set(query), _token_set(candidate_title)
 
@@ -223,6 +241,65 @@ def latest_accounts_filing(number):
         if item.get("links", {}).get("document_metadata"):
             return item, None
     return None, "no accounts with document found"
+
+
+def classify_accounts_type(filing_description: str, text: str) -> str:
+    """
+    Classify the filing as full / medium / small / micro / dormant.
+    Uses the CH filing description first, then the document text.
+    Small + micro filings legally omit the P&L, so briefs on them are thin.
+    """
+    desc = (filing_description or "").lower()
+    lower = (text or "").lower()
+
+    if "dormant" in desc or "dormant company" in lower:
+        return "dormant"
+    if "micro" in desc or "micro-entity" in lower or "micro entity" in lower:
+        return "micro"
+    # CH's "total exemption full/small accounts" = small-companies regime,
+    # despite the word "full" - usually no P&L filed
+    if "total exemption" in desc:
+        return "small"
+    if "small" in desc or re.search(r"small companies regime|provisions applicable to companies subject to the small", lower):
+        return "small"
+    if "medium" in desc or "medium-sized companies" in lower:
+        return "medium"
+    if "full" in desc or "group" in desc:
+        return "full"
+    # Heuristics from content: audited full accounts have these sections
+    has_pl = bool(re.search(r"(income statement|profit and loss account|statement of comprehensive income)", lower))
+    has_audit = "independent auditor" in lower
+    if has_pl and has_audit:
+        return "full"
+    if has_pl:
+        return "medium"
+    if re.search(r"balance sheet", lower) and not has_pl:
+        return "small"
+    return "unknown"
+
+
+def classify_accounts(description: str) -> str:
+    """
+    Map a CH filing description to a clean category.
+    full / group / medium -> rich disclosure, worth full pipeline
+    small                 -> usually abridged, little to read
+    micro / dormant       -> nothing useful, skip before fetching
+    NOTE: 'total-exemption-full' is a SMALL company (audit-exempt), not full accounts.
+    """
+    d = (description or "").lower()
+    if "group" in d:
+        return "group"
+    if "micro" in d:
+        return "micro"
+    if "dormant" in d:
+        return "dormant"
+    if "medium" in d:
+        return "medium"
+    if "total-exemption" in d or "abridged" in d or "small" in d:
+        return "small"
+    if "full" in d:
+        return "full"
+    return "unknown"
 
 
 def get_document(doc_metadata_url, dest_stem: Path):
@@ -326,7 +403,9 @@ KEEP_WORDS = re.compile(
     r"currenc|foreign exchange|hedg|forward|derivativ|exchange rate|import|export|"
     r"overseas|international|turnover|revenue|principal activit|strategic|review of|"
     r"borrow|overdraft|invoice discount|loan|creditor|going concern|acqui|fire|"
-    r"restructur|expansion|new (division|market|site|facility)|risk|parent|subsidiar",
+    r"restructur|expansion|new (division|market|site|facility)|risk|parent|subsidiar|"
+    r"cost of sales|gross profit|operating profit|profit before|income statement|"
+    r"statement of comprehensive|profit and loss",
     re.I,
 )
 
@@ -340,28 +419,33 @@ def trim_for_brief(text: str, head_chars: int = 6000, cap_chars: int = 28000) ->
     return (head + "\n---\n" + "\n".join(kept))[:cap_chars]
 
 
-def ai_brief(company_name: str, accounts_text: str, score: int, findings: list):
-    if not ANTHROPIC_KEY:
+def ai_brief(company_name: str, accounts_text: str, score: int, findings: list,
+             accounts_category: str = "unknown"):
+    if not _anthropic_key():
         return None
-    prompt = f"""You are preparing a cold-call battle card for an FX brokerage salesperson at Lumon (UK, sells FX risk management: forwards, options, no-deposit facilities, dedicated dealers).
-Below is extracted text from the latest filed statutory accounts for {company_name}. Regex pre-scan score: {score}. Signals found: {', '.join(findings) if findings else 'none'}.
+    prompt = f"""You are extracting hard evidence from UK statutory accounts for an FX brokerage salesperson at Lumon. Your job is EVIDENCE EXTRACTION, not summary. Never pad. If the accounts do not state something, write exactly "not disclosed".
+Company: {company_name}. Accounts filing category: {accounts_category}. Regex pre-scan score: {score}. Signals: {', '.join(findings) if findings else 'none'}.
 Return ONLY a JSON object, no markdown, with exactly these keys:
 - "one_liner": what the company does, one sentence, plain English
-- "turnover": the most recent annual turnover/revenue figure as a plain number with no currency symbol or commas if stated, else ""
-- "fx_summary": their FX exposure and how they currently manage it, 1-2 sentences, cite figures from the accounts where present
-- "triggers": recent events from the business review worth referencing on a call (fires, acquisitions, new divisions, growth, restructuring, new markets), 1-2 sentences, or "none found"
-- "sophistication": "hedger" (uses forwards/derivatives), "exposed-unhedged" (has FX, no hedging evident), "minimal" (little/no FX), or "unclear"
-- "overseas_parent": "yes" if owned/consolidated by a non-UK parent (FX may be run at group level), else "no"
-- "angle": the single best opening angle for the call in one sentence, matched to sophistication: hedgers get benchmarking/fixed-spread/margin-certainty language, never missed-upside talk; exposed-unhedged get margin-protection framing; cash-tight companies get no-deposit forwards. If sophistication is "minimal" or the accounts state minimal FX exposure, say exactly "DO NOT PURSUE - no meaningful FX exposure" instead of inventing an angle
-- "red_flags": anything suggesting caution (insolvency risk, restricted sectors like firearms/cannabis/adult/radioactive, tiny scale), or "none"
+- "turnover": most recent annual turnover/revenue/sales figure as a plain number, no symbols or commas. Check the income statement AND prior-year comparatives AND the strategic report. If abridged with no P&L, write "not disclosed - abridged"
+- "fx_pnl_figures": every exchange gain/loss figure stated, with year and amount, e.g. "FY25 loss 93593; FY24 loss 227054", or "not disclosed"
+- "currencies_named": every currency explicitly mentioned (USD, EUR, CHF, CNH etc) with context, e.g. "CHF - purchases from Swiss parent", or "not disclosed"
+- "export_split": export vs home turnover split if the geographic analysis gives it, with figures, or "not disclosed"
+- "hedging_instruments": what is actually HELD or USED - forwards, options, with commitment values where stated. Distinguish policy boilerplate ("policy permits hedging") from evidence of use. Or "none evident"
+- "est_fx_volume": reasoned estimate of annual FX volume with reasoning shown, labelled EST, e.g. "EST 5-8m+: export 26.1m of 37.7m turnover". If nothing supports one, "cannot estimate - no FX data disclosed"
+- "sophistication": "hedger" / "exposed-unhedged" / "minimal" / "unclear"
+- "overseas_parent": "yes - [parent, country]" if non-UK owned/consolidated, else "no"
+- "triggers": recent events worth referencing on a call (acquisitions, growth, new markets, restructuring), 1-2 sentences, or "none found"
+- "call_ammo": the 2-3 hardest verifiable facts from these accounts, flat statements with figures, NO pitch language. e.g. "Exchange losses 93,593 FY25 and 227,054 FY24. No hedging instruments held. Export is 69% of 37.7m turnover."
+- "red_flags": insolvency signals, restricted sectors (firearms/cannabis/adult/radioactive), going-concern doubts, or "none"
 ACCOUNTS TEXT:
 {trim_for_brief(accounts_text)}"""
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
+            headers={"x-api-key": _anthropic_key(), "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": CLAUDE_MODEL, "max_tokens": 900,
+            json={"model": CLAUDE_MODEL, "max_tokens": 1100,
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=120,
         )
@@ -382,9 +466,11 @@ ACCOUNTS TEXT:
 # ---------------------------------------------------------------------------
 def blank_result(name="", number=""):
     return {"company": name, "number": number, "matched_name": "", "match_bucket": "",
-            "match_reason": "", "score": "", "grade": "", "sophistication": "",
-            "overseas_parent": "", "one_liner": "", "fx_summary": "", "triggers": "",
-            "angle": "", "red_flags": "", "turnover": "", "accounts_date": "",
+            "match_reason": "", "score": "", "grade": "", "accounts_category": "",
+            "sophistication": "", "overseas_parent": "", "one_liner": "",
+            "fx_pnl_figures": "", "currencies_named": "", "export_split": "",
+            "hedging_instruments": "", "est_fx_volume": "", "call_ammo": "",
+            "triggers": "", "red_flags": "", "turnover": "", "accounts_date": "",
             "accounts_type": "", "read_method": "", "findings": "", "excerpts": "",
             "pdf_path": "", "error": ""}
 
@@ -427,6 +513,10 @@ def process_company(name="", number="", allow_weak=False, do_brief=True,
             return result
         result["accounts_date"] = filing.get("action_date", filing.get("date", ""))
         result["accounts_type"] = filing.get("description", "")
+        result["accounts_category"] = classify_accounts_type(result["accounts_type"], "")
+        if result["accounts_category"] in ("micro", "dormant"):
+            result["error"] = f"{result['accounts_category']} accounts - no useful disclosure, skipped"
+            return result
 
         safe = re.sub(r"[^A-Za-z0-9]+", "_", (result["matched_name"] or name or number))[:60]
         kind, payload, err = get_document(filing["links"]["document_metadata"],
@@ -448,17 +538,31 @@ def process_company(name="", number="", allow_weak=False, do_brief=True,
         result.update(score=score, findings=" | ".join(findings),
                       excerpts=" || ".join(excerpts[:4]), turnover=turnover)
 
-        if do_brief:
-            brief = ai_brief(result["matched_name"] or name, text, score, findings)
+        # Refine classification now the document text exists (CH descriptions are
+        # often just "accounts made up to ..." with no size hint)
+        if result["accounts_category"] in ("unknown", ""):
+            result["accounts_category"] = classify_accounts_type(result["accounts_type"], text)
+        if result["accounts_category"] in ("micro", "dormant"):
+            result["error"] = f"{result['accounts_category']} accounts - no useful disclosure, skipped"
+            return result
+
+        if do_brief and result["accounts_category"] == "small":
+            result["error"] = "small/abridged filing - little to read, brief skipped; qualify by phone"
+        elif do_brief:
+            brief = ai_brief(result["matched_name"] or name, text, score, findings,
+                             accounts_category=result["accounts_category"])
             if brief:
                 if "error" in brief:
                     result["error"] = f"brief: {brief['error']}"
                 else:
-                    for k in ("one_liner", "fx_summary", "triggers", "sophistication",
-                              "angle", "red_flags", "overseas_parent"):
+                    for k in ("one_liner", "fx_pnl_figures", "currencies_named",
+                              "export_split", "hedging_instruments", "est_fx_volume",
+                              "call_ammo", "triggers", "sophistication",
+                              "red_flags", "overseas_parent"):
                         result[k] = brief.get(k, "")
-                    if brief.get("turnover"):   # prefer model-extracted turnover
-                        result["turnover"] = brief["turnover"]
+                    t = str(brief.get("turnover", ""))
+                    if t and not t.startswith("not disclosed"):
+                        result["turnover"] = t
 
         result["grade"] = fx_grade(score, result["turnover"])
     except Exception as e:
