@@ -1,9 +1,0 @@
-streamlit
-pandas
-requests
-pdfplumber
-pdf2image
-pytesseract
-beautifulsoup4
-gspread
-google-auth
