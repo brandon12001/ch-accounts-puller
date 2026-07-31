@@ -1,24 +1,68 @@
 name: Pull accounts and triage
+
 on:
   workflow_dispatch:
+    inputs:
+      input_file:
+        description: "Input CSV in the repo (needs a 'name' column)"
+        required: true
+        default: "input.csv"
+      limit:
+        description: "Max companies this run (0 = all outstanding)"
+        required: false
+        default: "0"
+      briefs:
+        description: "Run the AI briefs (costs Anthropic credits)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write          # so the results cache can be committed back
 
 jobs:
   pull:
     runs-on: ubuntu-latest
+    timeout-minutes: 350   # GitHub kills the job at 360
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+
       - run: sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils
-      - run: pip install requests pdfplumber pdf2image pytesseract beautifulsoup4
-      - run: python ch_accounts_puller.py input.csv
+
+      # requirements.txt rather than a hardcoded list, so pypdfium2 and anything
+      # added later actually gets installed
+      - run: pip install -r requirements.txt
+
+      - run: |
+          python ch_accounts_puller.py "${{ github.event.inputs.input_file }}" \
+            --limit "${{ github.event.inputs.limit }}" \
+            ${{ github.event.inputs.briefs == 'true' && ' ' || '--no-brief' }}
         env:
           CH_API_KEY: ${{ secrets.CH_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: claude-haiku-4-5
+
+      # always: without this a timed-out or failed run loses every result
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: triage-results
           path: |
-            call_sheet.csv
+            call_sheet*.csv
             accounts/
+          retention-days: 30
+
+      # commit the cache so nothing is ever processed twice, on any machine
+      - name: Commit results cache
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add ch_results_cache.jsonl || true
+          git diff --staged --quiet || git commit -m "cache: run ${{ github.run_number }}"
+          git push || echo "nothing to push"
