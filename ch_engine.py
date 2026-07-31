@@ -19,6 +19,12 @@ from pathlib import Path
 import requests
 
 try:
+    import ch_cache
+    HAS_CACHE = True
+except ImportError:
+    HAS_CACHE = False
+
+try:
     import pdfplumber
     HAS_PDF = True
 except ImportError:
@@ -220,8 +226,10 @@ def search_candidates(name: str, limit: int = 5):
             "status": item.get("company_status", ""),
             "incorporated": item.get("date_of_creation", ""),
             "address": ", ".join(filter(None, [
-                addr.get("locality", ""), addr.get("postal_code", ""),
+                addr.get("address_line_1", ""), addr.get("locality", ""),
+                addr.get("region", ""), addr.get("postal_code", ""),
             ])),
+            "postcode": addr.get("postal_code", ""),
             "sic": ", ".join(item.get("sic_codes", []) or []),
             "match_bucket": bucket,
             "match_score": round(score, 2),
@@ -262,6 +270,29 @@ def auto_pick(name: str, allow_weak: bool = False):
 # ---------------------------------------------------------------------------
 # Filing + document (unchanged logic from v3.1)
 # ---------------------------------------------------------------------------
+DEAD_STATUSES = {"dissolved", "liquidation", "receivership", "administration",
+                 "converted-closed", "insolvency-proceedings"}
+
+
+def company_profile(number: str) -> dict:
+    """Registered office, status and SIC codes. One cheap call, no documents."""
+    r = rate_limited_get(f"{BASE}/company/{number}")
+    if r.status_code != 200:
+        return {}
+    j = r.json()
+    addr = j.get("registered_office_address", {}) or {}
+    return {
+        "matched_name": j.get("company_name", ""),
+        "company_status": j.get("company_status", ""),
+        "address": ", ".join(filter(None, [
+            addr.get("address_line_1", ""), addr.get("locality", ""),
+            addr.get("region", ""), addr.get("postal_code", ""),
+        ])),
+        "postcode": addr.get("postal_code", ""),
+        "sic_codes": ", ".join(j.get("sic_codes", []) or []),
+    }
+
+
 def latest_accounts_filing(number):
     r = rate_limited_get(f"{BASE}/company/{number}/filing-history",
                          params={"category": "accounts", "items_per_page": 5})
@@ -576,21 +607,48 @@ def blank_result(name="", number=""):
             "hedging_instruments": "", "est_fx_volume": "", "call_ammo": "",
             "triggers": "", "red_flags": "", "turnover": "", "accounts_date": "",
             "accounts_type": "", "read_method": "", "findings": "", "excerpts": "",
-            "pdf_path": "", "error": ""}
+            "pdf_path": "", "error": "",
+            # added: lets a run be filtered by region and stops dead companies
+            # being fetched at all
+            "address": "", "postcode": "", "company_status": "", "sic_codes": "",
+            "from_cache": ""}
 
 
 def process_company(name="", number="", allow_weak=False, do_brief=True,
-                    preselected=None):
+                    preselected=None, use_cache=True, force=False):
     """
     Full pipeline for one company.
     - If `number` given: skip name matching, go straight to accounts.
     - If `preselected` (a candidate dict from single-search confirm) given: use it.
     - Else: auto_pick by name with the confidence gate.
+
+    Results are cached to disk the moment they complete, so a run killed by a
+    dropped session or a CPU throttle can be restarted and will skip everything
+    already done. Pass force=True to re-read a company.
+
     Returns a result dict.
     """
+    if HAS_CACHE and use_cache and not force:
+        hit = ch_cache.cache_get(name=name, number=number)
+        if hit and not str(hit.get("error", "")).startswith("scanned pdf"):
+            out = {k: v for k, v in hit.items() if k != "_key"}
+            out["from_cache"] = "yes"
+            return out
+
     result = blank_result(name, number)
 
     try:
+        if number:
+            prof = company_profile(number)
+            for k in ("matched_name", "company_status", "address", "postcode", "sic_codes"):
+                if prof.get(k):
+                    result[k] = prof[k]
+            if result["company_status"].lower() in DEAD_STATUSES:
+                result["error"] = f"status: {result['company_status']}"
+                if HAS_CACHE and use_cache:
+                    ch_cache.cache_put(result)
+                return result
+
         if not number:
             if preselected:
                 chosen = preselected
@@ -614,12 +672,16 @@ def process_company(name="", number="", allow_weak=False, do_brief=True,
         filing, err = latest_accounts_filing(number)
         if err:
             result["error"] = err
+            if HAS_CACHE and use_cache:
+                ch_cache.cache_put(result)
             return result
         result["accounts_date"] = filing.get("action_date", filing.get("date", ""))
         result["accounts_type"] = filing.get("description", "")
         result["accounts_category"] = classify_accounts_type(result["accounts_type"], "")
         if result["accounts_category"] in ("micro", "dormant"):
             result["error"] = f"{result['accounts_category']} accounts - no useful disclosure, skipped"
+            if HAS_CACHE and use_cache:
+                ch_cache.cache_put(result)
             return result
 
         safe = re.sub(r"[^A-Za-z0-9]+", "_", (result["matched_name"] or name or number))[:60]
@@ -627,6 +689,8 @@ def process_company(name="", number="", allow_weak=False, do_brief=True,
                                           OUT_DIR / f"{safe}_{number}")
         if err:
             result["error"] = err
+            if HAS_CACHE and use_cache:
+                ch_cache.cache_put(result)
             return result
 
         if kind == "xhtml":
@@ -636,6 +700,8 @@ def process_company(name="", number="", allow_weak=False, do_brief=True,
             text, result["read_method"] = text_from_pdf(payload)
         if not text:
             result["error"] = "no readable text"
+            if HAS_CACHE and use_cache:
+                ch_cache.cache_put(result)
             return result
 
         score, findings, excerpts, turnover = scan_text(text)
@@ -648,6 +714,8 @@ def process_company(name="", number="", allow_weak=False, do_brief=True,
             result["accounts_category"] = classify_accounts_type(result["accounts_type"], text)
         if result["accounts_category"] in ("micro", "dormant"):
             result["error"] = f"{result['accounts_category']} accounts - no useful disclosure, skipped"
+            if HAS_CACHE and use_cache:
+                ch_cache.cache_put(result)
             return result
 
         if do_brief and result["accounts_category"] == "small":
@@ -671,4 +739,6 @@ def process_company(name="", number="", allow_weak=False, do_brief=True,
         result["grade"] = fx_grade(score, result["turnover"])
     except Exception as e:
         result["error"] = f"unexpected: {e}"
+    if HAS_CACHE and use_cache:
+        ch_cache.cache_put(result)
     return result
