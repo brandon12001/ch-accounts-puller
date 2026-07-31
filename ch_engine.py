@@ -68,7 +68,21 @@ DOC_BASE = "https://document-api.company-information.service.gov.uk"
 CLAUDE_MODEL = "claude-haiku-4-5"
 OUT_DIR = Path("accounts")
 OUT_DIR.mkdir(exist_ok=True)
-MAX_OCR_PAGES = 35
+MAX_OCR_PAGES = 30
+OCR_SCALE = 200 / 72        # kept at 200dpi: 150 measurably lost text from tables
+OCR_MAX_PX = 2200           # cap the long edge, some CH scans are A3
+OCR_TRIAGE_SCALE = 72 / 72   # cheap first pass, only to find which pages matter
+OCR_ALWAYS_PAGES = 3        # strategic report usually starts early
+# Pages worth spending full-resolution OCR on. Everything else is cover pages,
+# directors' responsibilities, audit boilerplate and signature pages.
+OCR_KEEP = re.compile(
+    r"foreign|currenc|exchange|hedg|forward contract|derivative|overseas|export|"
+    r"import|geographic|turnover|revenue|profit and loss|income statement|"
+    r"financial instrument|subsidiar|group undertaking|euro|dollar|usd|eur",
+    re.I,
+)
+OCR_CONFIG = ""             # default tesseract config: psm 6 lost text from tables
+OCR_ENOUGH = 10_000_000     # effectively off: notes to the accounts are at the BACK
 
 # FX scan patterns (unchanged from v3.1)
 PATTERNS = [
@@ -349,63 +363,104 @@ def text_from_xhtml(xhtml: str) -> str:
 
 
 def text_from_pdf(path: Path):
-    """Extract text from a PDF. Text layer first, OCR second.
+    """Extract text from a PDF, doing as little OCR as possible.
 
-    Companies House serves plenty of older filings as image-only scans, where
-    the text layer is empty and OCR is the only route. Rendering is attempted
-    with pypdfium2 first because it needs no system packages, falling back to
-    pdf2image, which requires poppler-utils. Errors name the stage that failed
-    so a missing dependency is obvious from the call sheet.
+    Companies House filings are often hybrid: a scanned cover and signature
+    page wrapped around pages that do carry a text layer. Previously a weak
+    overall text layer sent the whole document to OCR. Now each page is checked
+    individually and only the pages that genuinely need it are rendered, which
+    is where nearly all the CPU goes.
     """
-    text = ""
+    page_text, needs_ocr = {}, []
+    n_pages = 0
     if HAS_PDF:
         try:
             with pdfplumber.open(path) as pdf:
-                for page in pdf.pages:
-                    text += (page.extract_text() or "") + "\n"
+                n_pages = len(pdf.pages)
+                for i, page in enumerate(pdf.pages[:MAX_OCR_PAGES]):
+                    t = page.extract_text() or ""
+                    page_text[i] = t
+                    if len(t.strip()) < 100:
+                        needs_ocr.append(i)
         except Exception:
-            text = ""
-    if len(text.strip()) >= 200:
-        return text, "text-layer"
+            page_text, needs_ocr, n_pages = {}, [], 0
+
+    joined = "\n".join(page_text.get(i, "") for i in sorted(page_text))
+    if page_text and not needs_ocr and len(joined.strip()) >= 200:
+        return joined, "text-layer"
+    if not needs_ocr and n_pages == 0:
+        needs_ocr = list(range(MAX_OCR_PAGES))
 
     if not HAS_TESS:
-        return "", "scanned pdf, pytesseract not installed"
+        return (joined, "text-layer-partial") if len(joined.strip()) >= 200 else ("", "scanned pdf, pytesseract not installed")
 
-    images, renderer, render_err = [], "", ""
-
+    renderer, render_err = "", ""
+    doc = None
     if HAS_PDFIUM:
         try:
             doc = pdfium.PdfDocument(str(path))
-            pages = min(len(doc), MAX_OCR_PAGES)
-            images = [doc[i].render(scale=200 / 72).to_pil() for i in range(pages)]
             renderer = "pdfium"
         except Exception as exc:
-            images, render_err = [], f"pdfium: {exc}"
+            doc, render_err = None, f"pdfium: {exc}"
 
-    if not images and HAS_PDF2IMAGE:
+    ocr_pages = 0
+    if doc is not None:
+        limit = min(len(doc), MAX_OCR_PAGES)
+        targets = [i for i in needs_ocr if i < limit]
+
+        # Pass one: cheap low-resolution OCR purely to decide which pages are
+        # worth reading properly. Cost scales with the square of resolution, so
+        # this runs at roughly a sixth of the price of a full pass.
+        if len(targets) > OCR_ALWAYS_PAGES:
+            keep = []
+            for i in targets:
+                if i < OCR_ALWAYS_PAGES:
+                    keep.append(i)
+                    continue
+                try:
+                    thumb = doc[i].render(scale=OCR_TRIAGE_SCALE).to_pil()
+                    rough = pytesseract.image_to_string(thumb, config="--psm 6")
+                except Exception:
+                    keep.append(i)      # if triage fails, read it properly
+                    continue
+                if OCR_KEEP.search(rough):
+                    keep.append(i)
+            # a table can run over a page break, so keep the page after each hit
+            keep = sorted(set(keep) | {i + 1 for i in keep if i + 1 in targets})
+            targets = keep
+
+        for i in targets:
+            try:
+                img = doc[i].render(scale=OCR_SCALE).to_pil()
+                if max(img.size) > OCR_MAX_PX:
+                    ratio = OCR_MAX_PX / max(img.size)
+                    img = img.resize((int(img.width * ratio), int(img.height * ratio)))
+                page_text[i] = pytesseract.image_to_string(img, config=OCR_CONFIG)
+                ocr_pages += 1
+            except Exception as exc:
+                render_err = f"tesseract: {exc}"
+                break
+        joined = "\n".join(page_text.get(k, "") for k in sorted(page_text))
+    elif HAS_PDF2IMAGE:
         try:
             images = convert_from_path(path, dpi=200, last_page=MAX_OCR_PAGES)
+            for i, img in enumerate(images):
+                if i in needs_ocr:
+                    page_text[i] = pytesseract.image_to_string(img, config=OCR_CONFIG)
+                    ocr_pages += 1
             renderer = "poppler"
+            joined = "\n".join(page_text.get(k, "") for k in sorted(page_text))
         except Exception as exc:
             render_err = "; ".join(x for x in (render_err, f"poppler: {exc}") if x)
 
-    if not images:
-        detail = render_err or "no pdf renderer installed"
-        return "", f"scanned pdf, could not render ({detail})"
-
-    try:
-        ocr = "".join(pytesseract.image_to_string(img) + "\n" for img in images)
-    except Exception as exc:
-        return "", f"scanned pdf, tesseract binary missing? ({exc})"
-
-    if len(ocr.strip()) >= 200:
-        return ocr, f"ocr-{renderer}"
-    return "", f"scanned pdf, ocr returned only {len(ocr.strip())} chars"
+    if len(joined.strip()) >= 200:
+        if ocr_pages == 0:
+            return joined, "text-layer"
+        return joined, f"ocr-{renderer}({ocr_pages}p)"
+    detail = render_err or "no renderer available"
+    return "", f"scanned pdf, could not read ({detail})"
 
 
-# ---------------------------------------------------------------------------
-# FX scan + grading (v3.1 scan, v4 grade)
-# ---------------------------------------------------------------------------
 def scan_text(text: str):
     lower = text.lower()
     score, findings, excerpts = 0, [], []
