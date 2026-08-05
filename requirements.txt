@@ -7,3 +7,4 @@ pdfplumber
 pypdfium2
 pytesseract
 pdf2image
+starlette<1.4
