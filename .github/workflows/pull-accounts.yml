@@ -1,12 +1,18 @@
 name: Pull accounts and triage
 
+# Runs the Companies House triage on a GitHub runner rather than Streamlit
+# Community Cloud: several cores, no CPU throttle, no browser session to drop.
+#
+# Fire it from the Actions tab. Results come back as a downloadable artifact
+# and the results cache is committed so nothing is ever processed twice.
+
 on:
   workflow_dispatch:
     inputs:
       input_file:
-        description: "Input CSV in the repo (needs a 'name' column)"
+        description: "Input CSV in the repo root (needs a 'name' column)"
         required: true
-        default: "input.csv"
+        default: "ch_run_list2.csv"
       limit:
         description: "Max companies this run (0 = all outstanding)"
         required: false
@@ -32,32 +38,41 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - run: sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils
+      - name: Install OCR system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr poppler-utils
+          tesseract --version
 
-      # requirements.txt rather than a hardcoded list, so pypdfium2 and anything
-      # added later actually gets installed
-      - run: pip install -r requirements.txt
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pypdfium2 pdfplumber pytesseract beautifulsoup4 lxml requests pandas
 
-      - run: |
-          python ch_accounts_puller.py "${{ github.event.inputs.input_file }}" \
-            --limit "${{ github.event.inputs.limit }}" \
-            ${{ github.event.inputs.briefs == 'true' && ' ' || '--no-brief' }}
+      - name: Run the batch
         env:
           CH_API_KEY: ${{ secrets.CH_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: claude-haiku-4-5
+        run: |
+          python run_batch.py \
+            --input "${{ github.event.inputs.input_file }}" \
+            --out "call_sheet_$(date +%d-%m-%Y_%H%M).csv" \
+            --limit "${{ github.event.inputs.limit }}" \
+            ${{ github.event.inputs.briefs == 'true' && ' ' || '--no-brief' }}
 
       # always: without this a timed-out or failed run loses every result
-      - uses: actions/upload-artifact@v4
+      - name: Upload the call sheet
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: triage-results
           path: |
             call_sheet*.csv
-            accounts/
+            ch_results_cache.jsonl
           retention-days: 30
+          if-no-files-found: warn
 
-      # commit the cache so nothing is ever processed twice, on any machine
       - name: Commit results cache
         if: always()
         run: |
