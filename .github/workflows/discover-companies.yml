@@ -33,13 +33,17 @@ on:
         required: false
         default: ""
       max_results:
-        description: "How many companies to find"
+        description: "How many companies that file FULL/GROUP/MEDIUM accounts to find"
         required: false
-        default: "200"
+        default: "100"
       min_age_years:
         description: "Skip companies incorporated more recently than this"
         required: false
-        default: "8"
+        default: "10"
+      all_sizes:
+        description: "Include small and micro filers (normally leave unticked)"
+        type: boolean
+        default: false
       briefs:
         description: "Run the AI briefs (needed for turnover and call angles)"
         type: boolean
@@ -88,6 +92,7 @@ jobs:
             --max "${{ github.event.inputs.max_results }}" \
             --min-age "${{ github.event.inputs.min_age_years }}" \
             --triage-limit "${{ github.event.inputs.triage_limit }}" \
+            ${{ github.event.inputs.all_sizes == 'true' && '--all-sizes' || ' ' }} \
             --out-list "discovered_${SLUG}_$(date +%d-%m-%Y).csv" \
             --out "call_sheet_${SLUG}_$(date +%d-%m-%Y_%H%M).csv" \
             ${{ github.event.inputs.briefs == 'true' && ' ' || '--no-brief' }}
