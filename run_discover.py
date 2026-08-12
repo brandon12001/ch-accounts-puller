@@ -93,6 +93,8 @@ def main() -> int:
     ap.add_argument("--triage-limit", type=int, default=0, help="cap how many get triaged")
     ap.add_argument("--all-sizes", action="store_true",
                     help="do not screen out small and micro filers before triage")
+    ap.add_argument("--keep-parents", action="store_true",
+                    help="keep companies with a foreign or operating-group parent in the output")
     args = ap.parse_args()
 
     sic = [c.strip() for c in args.sic.split(",") if c.strip()]
@@ -185,12 +187,26 @@ def main() -> int:
             res.setdefault(k, "") or res.update({k: res.get(k) or row.get(k, "")})
         if HAS_CLASSIFY:
             res.update(ch_classify.classify(res))
+            res["parent_control"] = ch_classify.parent_control(res)
         results.append(res)
 
         rate = (time.time() - started) / i
         note = res.get("priority") or res.get("grade") or (res.get("error", "")[:34] or "done")
         print(f"[{i}/{len(todo)}] {row['name'][:44]:46} {note:34} "
               f"eta {(len(todo) - i) * rate / 60:5.1f}m", flush=True)
+
+    # Drop companies where the decision sits with a foreign parent or a separate
+    # operating group. A UK holding company that echoes the subsidiary's name is
+    # kept, since those are structures rather than treasury functions.
+    if HAS_CLASSIFY and not args.keep_parents:
+        before = len(results)
+        blocked = [r for r in results if not ch_classify.winnable(r)]
+        results = [r for r in results if ch_classify.winnable(r)]
+        if blocked:
+            from collections import Counter
+            mix = Counter(r.get("parent_control", "?") for r in blocked)
+            print("\nparent screen dropped " + str(before - len(results)) + ": "
+                  + ", ".join(f"{v} {k}" for k, v in mix.most_common()), flush=True)
 
     if results:
         cols: list[str] = []
