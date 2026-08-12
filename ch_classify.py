@@ -51,6 +51,65 @@ IMPORTER = re.compile(
 
 THIN_FILING = {"small", "abridged", "micro", "dormant", "unknown", ""}
 
+# Countries that mean treasury is very unlikely to sit in the UK. Designplan,
+# Hochiki, Cargill, Altek and Bergstrom were all lost on exactly this.
+FOREIGN = re.compile(
+    r"\b(japan|jersey|germany|german|usa|u\.s\.a|united states|america|sweden|swedish|"
+    r"denmark|danish|norway|netherlands|dutch|france|french|spain|spanish|italy|italian|"
+    r"ireland|irish|switzerland|swiss|austria|belgium|poland|polish|china|chinese|india|"
+    r"indian|korea|taiwan|hong kong|singapore|australia|canada|cayman|luxembourg|"
+    r"jamaica|turkey|turkish|israel|brazil|south africa|"
+    r"gmbh|s\.?a\.?r\.?l|b\.?v\b|a/s\b|\bab\b|\bas\b|\bnv\b|\bsas\b|\bspa\b|inc\.|"
+    r"corporation|established under law of (a )?state other than)",
+    re.I,
+)
+UK_MARKER = re.compile(
+    r"\b(england and wales|england|wales|scotland|northern ireland|united kingdom|\buk\b)\b",
+    re.I,
+)
+# A parent whose name echoes the subsidiary's is nearly always a holding vehicle
+# rather than an operating group with its own treasury function.
+HOLDING_WORD = re.compile(r"\b(holdings?|group|investments?|bidco|topco|midco|newco)\b", re.I)
+
+
+def _stem_name(s: str) -> set[str]:
+    s = re.sub(r"[^a-z0-9 ]", " ", str(s).lower())
+    drop = {"limited", "ltd", "plc", "llp", "uk", "holdings", "holding", "group",
+            "investments", "investment", "the", "and", "co", "company", "bidco",
+            "topco", "midco", "newco", "england", "wales", "scotland", "united",
+            "kingdom", "yes", "no", "not", "disclosed", "parent", "ultimate"}
+    return {w for w in s.split() if w and w not in drop and len(w) > 2}
+
+
+def parent_control(row) -> str:
+    """Who is likely to decide on FX.
+
+    none          no parent, the person you reach decides
+    uk-holding    UK parent that echoes the company name, so a holding structure
+    uk-group      UK parent with a different name, an operating group. Ask first
+    foreign       overseas parent, treasury almost certainly sits abroad
+    unknown       stated but not resolvable
+    """
+    raw = str(row.get("overseas_parent", "") or "").strip()
+    if not raw or raw.lower() in ("no", "none", "not disclosed", "nan"):
+        return "none"
+    if FOREIGN.search(raw):
+        return "foreign"
+    # A holding-sounding name is only reassuring if the parent is also UK. Hochiki
+    # Group reads like a holding company but the parent is Japanese, so requiring
+    # a UK marker keeps that in "unknown" where it belongs.
+    if UK_MARKER.search(raw):
+        shared = _stem_name(raw) & _stem_name(row.get("company", ""))
+        if shared or HOLDING_WORD.search(raw):
+            return "uk-holding"
+        return "uk-group"
+    return "unknown"
+
+
+def winnable(row) -> bool:
+    """Is this a company where the person you reach can actually decide?"""
+    return parent_control(row) in ("none", "uk-holding")
+
 
 def _txt(row, *keys) -> str:
     return " ".join(str(row.get(k, "") or "") for k in keys)
