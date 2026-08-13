@@ -1,0 +1,57 @@
+name: Daily triggers
+
+# Watches the qualified universe for Companies House events that give a reason
+# to call today: new finance appointments, new borrowing, fresh accounts.
+#
+# Runs itself every weekday at 06:30 UK so the list is waiting before dialling
+# hours, and can also be fired manually.
+
+on:
+  schedule:
+    - cron: "30 5 * * 1-5"      # 06:30 BST, weekdays
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How far back to look for events"
+        required: false
+        default: "30"
+      min_score:
+        description: "Minimum score (4 = everything, 9 = finance changes only)"
+        required: false
+        default: "6"
+
+permissions:
+  contents: write
+
+jobs:
+  triggers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install requests
+
+      - name: Scan for triggers
+        env:
+          CH_API_KEY: ${{ secrets.CH_API_KEY }}
+        run: |
+          python trigger_monitor.py \
+            --days "${{ github.event.inputs.days || '30' }}" \
+            --min-score "${{ github.event.inputs.min_score || '6' }}" \
+            --out "triggers_$(date +%d-%m-%Y).csv"
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-triggers
+          path: triggers_*.csv
+          retention-days: 30
+          if-no-files-found: warn
