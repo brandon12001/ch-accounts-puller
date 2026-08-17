@@ -1,0 +1,84 @@
+name: Build merge emails
+
+# Contact list in, bespoke merge emails out.
+#
+# Matches each contact to the accounts already read, triages any company not
+# seen before, then writes one email per contact from that company's own filed
+# figures. Exports a CSV for Word mail merge.
+#
+# It does not send. Sending from a script would bypass the Salesforce BCC and
+# the Outlook signature carrying the regulatory footer.
+
+on:
+  workflow_dispatch:
+    inputs:
+      contacts_file:
+        description: "Contacts CSV in the repo root (needs a company column)"
+        required: true
+        default: "leads.csv"
+      priority:
+        description: "Which to write for"
+        type: choice
+        default: "P1,P2"
+        options:
+          - "P1,P2"
+          - "P1,P2,P3"
+          - "P1"
+          - "ALL"
+      triage_missing:
+        description: "Run the triage on companies not yet read"
+        type: boolean
+        default: true
+      limit:
+        description: "Cap how many contacts (0 = all)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: write
+
+jobs:
+  emails:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install OCR system packages
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr poppler-utils
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pypdfium2 pdfplumber pytesseract beautifulsoup4 lxml requests pandas
+      - name: Build emails
+        env:
+          CH_API_KEY: ${{ secrets.CH_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: claude-haiku-4-5
+        run: |
+          python build_emails.py \
+            --contacts "${{ github.event.inputs.contacts_file }}" \
+            --priority "${{ github.event.inputs.priority }}" \
+            --limit "${{ github.event.inputs.limit }}" \
+            --out "merge_$(date +%d-%m-%Y_%H%M).csv" \
+            ${{ github.event.inputs.triage_missing == 'true' && ' ' || '--no-triage' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: merge-emails
+          path: |
+            merge_*.csv
+            ch_results_cache.jsonl
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Commit results cache
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add ch_results_cache.jsonl || true
+          git diff --staged --quiet || git commit -m "emails: run ${{ github.run_number }}"
+          git push || echo "nothing to push"
