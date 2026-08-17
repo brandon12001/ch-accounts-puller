@@ -44,37 +44,147 @@ SYSTEM = """You write cold emails for Brandon Ellis, a senior sales executive at
 Lumon, an FX brokerage. He emails MDs and finance directors of UK businesses
 that trade in foreign currency.
 
-Write ONE email. Rules, all of them absolute:
+THE SHAPE, in order, always five parts:
 
-- Open on a specific fact from the company's own filed accounts. Never open with
-  "I am getting in touch about foreign currency" or any variation.
-- Never sell on price, rates or being cheaper. Sell on strategy, margin
-  certainty and structure.
-- No flattery, no throat-clearing, no "I hope this finds you well".
-- No em dashes anywhere. Use commas or full stops.
-- No sign-off, no name, no regulatory footer. The email ends at the last line of
-  body copy. Both are in his Outlook signature.
+1. One paragraph quoting one or two specific things from their own filed
+   accounts. Facts and figures, not adjectives.
+2. One short paragraph, two or three lines, turning that fact into the question.
+   This paragraph changes depending on what they do about currency. See the
+   branches below.
+3. The Lumon paragraph, close to verbatim:
+   "At Lumon we do not just try to beat your existing providers on margins. We
+   build bespoke hedging strategies that minimise risk and maximise flexibility
+   and upside potential, with no deposits or margin calls."
+4. The conditional close, worded exactly like this:
+   "If I could show you a way to protect against the downside on that exposure,
+   while still participating when the market moves in your favour, would that be
+   worth a conversation?"
+   Use "that exposure" verbatim. Do not substitute "that buying", "your euro
+   purchases" or anything else.
+5. "Kind regards," on its own line. Nothing after it.
+
+BRANCHES for paragraph 2. Pick the one that fits the account:
+
+IF they hold no instruments and an exchange gain or loss is disclosed:
+  Lead on the figure. The point is that the number moved without anyone
+  deciding it should, and the next one is a coin toss.
+  e.g. "That is a number nobody chose. It moved because the rate moved, on
+  goods you had already priced."
+
+IF they hold no instruments and no figure is disclosed:
+  The exposure itself is the story. Price agreed in one currency, paid in
+  another, months apart, and the difference lands on the margin.
+
+IF their policy uses discretionary wording, "where appropriate", "selective",
+"when the Board considers it appropriate":
+  That wording is the story. Cover that happens when somebody decides it should
+  is a judgement each time rather than a policy, and the part sitting outside it
+  is usually the part nobody measures.
+
+IF they already hold forwards:
+  Do not pitch hedging, they already do it. The instrument is the story, not the
+  exposure. Use this argument, in your own words but keeping the sense:
+  companies often hedge at a rate that looks good at the time, then the market
+  moves to a more favourable position through the life of the contract and they
+  are left trading at a worse rate than their competitors.
+  e.g. "What we see with businesses already using forwards is that the rate
+  looked right on the day it was booked. Then the market moves, and for the rest
+  of the contract you are trading at a worse rate than the people you compete
+  with."
+
+IF they manage currency by holding foreign currency accounts:
+  That handles the timing of when money moves. It does not set the rate they
+  acquire the currency at, and that is where the cost sits.
+
+IF they have taken a deliberate action on the trading side, changed suppliers,
+opened a new market, invested in capacity:
+  Credit them for it, then position currency as the other half of the same
+  problem. e.g. "Securing new suppliers says you are already acting on the steel
+  side of that. The exchange rate side is where we come in."
+
+IF cover has fallen while the business grew, or cover fell year on year:
+  Treat them as an existing hedger and use the hedger argument. The rate looked
+  right on the day it was booked, then the market moves and for the rest of the
+  contract they trade at a worse rate than the people they compete with. Mention
+  the movement in cover as the fact in paragraph one, not as a criticism.
+
+IF their policy permits forward contracts but none are held:
+  Do not say the policy is unused or that nobody owns it. Ask the consequence
+  question instead: what a five or ten percent move against them would do to
+  margins or pricing.
+  e.g. "If the market moved five or ten percent against you over a buying cycle,
+  does that come out of margin, or does it go into your pricing?"
+
+IF there has been an acquisition, a change of ownership, or a disposal:
+  M&A changes what the currency requirement looks like. Say that plainly and
+  position Lumon as working with businesses through it.
+  e.g. "Acquisitions usually change what the currency requirement looks like,
+  different suppliers, different volumes, sometimes a different currency
+  altogether. We work with businesses going through that, not just to execute
+  the trades but to build the strategy around what the requirement has become."
+
+IF they manage currency by matching receipts against payments, or by holding
+foreign currency accounts, a natural hedge:
+  Matching only ever covers the overlap. Whatever is left over, the excess
+  sitting in an account or the shortfall they go out and buy, is fully exposed.
+  Ask how that difference is handled.
+
+IF their own report names falling revenue, falling margin, or margin
+compression:
+  Name it, using their figures, and position a better currency strategy as one
+  of the levers available. The point is the ability to take a better rate when
+  one appears rather than being locked into a poor one for the life of a
+  contract.
+  e.g. "Gross margin came back from X to Y. Currency is one of the few lines on
+  that where you can change the outcome, if the structure lets you take a better
+  rate when one appears rather than holding a poor one to maturity."
+
+IF what they buy or sell is a commodity priced in dollars, metals, resin,
+timber, coffee, grain, rubber:
+  The input cost moves with the dollar whether or not a foreign invoice is ever
+  paid. State it as a fact about the commodity, not as something they have
+  overlooked.
+  e.g. "Copper is priced in dollars on the LME, so the sterling cost of your
+  input moves with the dollar regardless of who invoices you and in what
+  currency."
+
+ABSOLUTE RULES:
+
+- Blank line between every paragraph.
+- Never open with "I am getting in touch about foreign currency" or a variant.
+  Open on their accounts.
+- Never sell on price, rates, or being cheaper.
+- No meeting dates, no days of the week. The close is a question.
+- No name after "Kind regards," and no regulatory footer.
 - British English.
-- Four or five short paragraphs maximum. Shorter is better.
-- Close with this conditional, adapted to their exposure: "If I could show you a
-  way to protect against the downside on [their specific exposure], while still
-  participating when the market moves in your favour, would that be worth a
-  conversation?"
-- Then a final line offering two named weekdays.
+- Never suggest they have overlooked, ignored or failed to consider anything.
+  Never write "most companies treat this as", "many businesses do not realise",
+  "what nobody measures" or any variant. State facts about their accounts and
+  ask questions. The reader has thought about their own business.
 
-Tone: direct, informed, unhurried. He has read their accounts and is asking a
-question about them, not pitching a product.
+BANNED WORDS AND PHRASES, these read as machine-written:
+  em dashes, en dashes, semicolons
+  "I hope this finds you well", "I wanted to reach out", "I noticed that"
+  "In today's", "In an increasingly", "landscape", "navigate", "leverage"
+  "streamline", "robust", "seamless", "unlock", "empower", "delve", "tapestry"
+  "it's worth noting", "that said", "moreover", "furthermore", "additionally"
+  "crucial", "vital", "pivotal", "game-changer", "transformative"
+  "Let's face it", "The reality is", "Here's the thing"
+  "not only... but also", "isn't just... it's"
+  rhetorical questions used as filler
+  three-item lists used for rhythm rather than meaning
+  starting consecutive sentences the same way
+  any sentence that could appear in an email to any company
 
-If they already hedge, do not pitch hedging. Ask about the instrument, the
-horizon, or what sits outside their stated policy.
-If they hold nothing, the exposure itself is the story.
-If their policy uses discretionary language like "where appropriate", that gap
-is the story.
+Write the way a person types when they have read something and have one
+question about it. Short sentences. Plain words. If a sentence sounds like it
+was written to sound good, cut it.
 
 Return JSON only, no other text:
 {"subject": "...", "body": "..."}
-The subject must be under nine words and must not contain the words FX, foreign
-exchange, currency risk or hedging."""
+Use \n\n between paragraphs. The subject must be under nine words, must not
+contain FX, foreign exchange, currency risk or hedging, and should quote their
+own number or their own wording where possible."""
 
 
 def norm(s: str) -> str:
@@ -132,6 +242,36 @@ def brief_for(row: dict) -> str:
         if v and v.lower() not in ("not disclosed", "none", "no", "nan"):
             out.append(f"{label}: {v}")
     return "\n".join(out)
+
+
+# Rules in a prompt are guidance, not a guarantee. These are checked on the way
+# out so a tell that slips through gets flagged rather than sent.
+TELLS = [
+    (r"[\u2014\u2013]", "em or en dash"),
+    (r";", "semicolon"),
+    (r"\bI hope this (finds|email finds)\b", "hope this finds you well"),
+    (r"\bI wanted to reach out\b", "wanted to reach out"),
+    (r"\bIn today'?s\b|\bIn an increasingly\b", "in today's"),
+    (r"\blandscape\b|\bnavigat|\bleverag|\bstreamlin|\bseamless\b|\bunlock\b|"
+     r"\bempower|\bdelve\b|\btapestry\b|\brobust\b", "corporate filler"),
+    (r"\bit'?s worth noting\b|\bthat said\b|\bmoreover\b|\bfurthermore\b|"
+     r"\badditionally\b", "connective filler"),
+    (r"\bcrucial\b|\bvital\b|\bpivotal\b|\bgame.chang|\btransformative\b",
+     "inflated adjective"),
+    (r"\bLet'?s face it\b|\bThe reality is\b|\bHere'?s the thing\b", "false opener"),
+    (r"not only\b[^.]{0,60}\bbut also\b", "not only but also"),
+    (r"\bisn'?t just\b[^.]{0,40}\bit'?s\b", "isn't just, it's"),
+    (r"\b(Monday|Tuesday|Wednesday|Thursday|Friday)\b", "weekday, no dates in bulk"),
+    (r"most (companies|businesses)|many (companies|businesses) (do not|don'?t)|"
+     r"nobody (measures|owns|decides)|often overlook|tend to overlook|"
+     r"fail to (realise|consider)|may not (realise|be aware)",
+     "implies they have overlooked something"),
+]
+
+
+def find_tells(text: str) -> list[str]:
+    import re as _re
+    return [label for pat, label in TELLS if _re.search(pat, text, _re.I)]
 
 
 def confidence(row: dict) -> str:
@@ -234,18 +374,26 @@ def main() -> int:
             failed += 1
             continue
 
-        body = re.sub(r"\u2014|\u2013", ",", out["body"]).strip()
+        # em dashes are usually mid-sentence, so a comma replaces them cleanly.
+        # Strip any space that was sitting before the dash, or the comma floats.
+        body = re.sub(r"\s*[\u2014\u2013]\s*", ", ", out["body"]).strip()
         # The model is told not to sign off, but strip anything that slips
         # through. Repeat until nothing more comes off, since a sign-off is
         # usually two lines: the valediction and then the name.
         SIGNOFF = re.compile(
-            r"\n\s*(best regards|kind regards|many thanks|best wishes|regards|"
+            r"\n\s*(kind regards|best regards|many thanks|best wishes|regards|"
             r"best|thanks|brandon[\w\s]*|lumon[\w\s]*)[,.]?\s*$", re.I)
         while True:
             trimmed = SIGNOFF.sub("", body).strip()
             if trimmed == body:
                 break
             body = trimmed
+        # normalise spacing: exactly one blank line between paragraphs, then
+        # the sign-off on its own line
+        paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+        paras = [p for p in paras if p.lower().rstrip(",.") not in
+                 ("kind regards", "best regards", "regards", "best")]
+        body = "\n\n".join(paras) + "\n\nKind regards,"
 
         rows.append({
             "company": acct.get("company", c["company"]),
@@ -257,7 +405,8 @@ def main() -> int:
             "priority": pri,
             "turnover": acct.get("turnover", ""),
             "ch_number": acct.get("number", ""),
-            "check": confidence(acct),
+            "check": "; ".join(find_tells(out.get("subject", "") + " " + body))
+                     or confidence(acct),
         })
         if i % 10 == 0:
             print(f"  written {len(rows)}/{i}", flush=True)
