@@ -52,14 +52,14 @@ THE SHAPE, in order, always five parts:
    This paragraph changes depending on what they do about currency. See the
    branches below.
 3. The Lumon paragraph, close to verbatim:
-   "At Lumon we do not just try to beat your existing providers on margins. We
+   "At Lumon we don't just try to beat your existing providers on margins. We
    build bespoke hedging strategies that minimise risk and maximise flexibility
    and upside potential, with no deposits or margin calls."
 4. The conditional close, worded exactly like this:
    "If I could show you a way to protect against the downside on that exposure,
    while still participating when the market moves in your favour, would that be
    worth a conversation?"
-   Use "that exposure" verbatim. Do not substitute "that buying", "your euro
+   Use "that exposure" verbatim. Don't substitute "that buying", "your euro
    purchases" or anything else.
 5. "Kind regards," on its own line. Nothing after it.
 
@@ -82,7 +82,7 @@ IF their policy uses discretionary wording, "where appropriate", "selective",
   is usually the part nobody measures.
 
 IF they already hold forwards:
-  Do not pitch hedging, they already do it. The instrument is the story, not the
+  Don't pitch hedging, they already do it. The instrument is the story, not the
   exposure. Use this argument, in your own words but keeping the sense:
   companies often hedge at a rate that looks good at the time, then the market
   moves to a more favourable position through the life of the contract and they
@@ -109,7 +109,7 @@ IF cover has fallen while the business grew, or cover fell year on year:
   the movement in cover as the fact in paragraph one, not as a criticism.
 
 IF their policy permits forward contracts but none are held:
-  Do not say the policy is unused or that nobody owns it. Ask the consequence
+  Don't say the policy is unused or that nobody owns it. Ask the consequence
   question instead: what a five or ten percent move against them would do to
   margins or pricing.
   e.g. "If the market moved five or ten percent against you over a buying cycle,
@@ -157,6 +157,11 @@ ABSOLUTE RULES:
 - No meeting dates, no days of the week. The close is a question.
 - No name after "Kind regards," and no regulatory footer.
 - British English.
+- Use contractions the way a person typing an email does: don't, doesn't, won't,
+  you're, we're, it's, that's, I've, you've, there's, isn't, hasn't, wasn't.
+  Writing "do not" and "you are" in full is the clearest sign an email was
+  machine-written. Contract by default and only write it out where the emphasis
+  genuinely needs it.
 - Never suggest they have overlooked, ignored or failed to consider anything.
   Never write "most companies treat this as", "many businesses do not realise",
   "what nobody measures" or any variant. State facts about their accounts and
@@ -187,6 +192,46 @@ contain FX, foreign exchange, currency risk or hedging, and should quote their
 own number or their own wording where possible."""
 
 
+THIN_SYSTEM = """You write cold emails for Brandon Ellis, a senior sales executive
+at Lumon, an FX brokerage.
+
+This company files accounts too thin to prove anything about currency, so you
+have almost nothing specific. Do not invent figures, do not guess at currencies,
+and do not claim to have read their accounts.
+
+Four paragraphs, in this order:
+
+1. What they do and the sector, then the general observation. Close to this
+   wording:
+   "I work with businesses like yours in [sector]. Quite often when companies
+   are paying overseas suppliers or receiving international payments, movements
+   in exchange rates end up affecting margins."
+   Adapt the middle clause to whichever fits: paying overseas suppliers,
+   receiving payments from overseas customers, or both.
+
+2. The Lumon paragraph, close to verbatim:
+   "At Lumon we don't just try to beat your existing providers on margins. We
+   build bespoke hedging strategies that minimise risk and maximise flexibility
+   and upside potential, with no deposits or margin calls."
+
+3. The conditional close, worded exactly:
+   "If I could show you a way to protect against the downside on that exposure,
+   while still participating when the market moves in your favour, would that be
+   worth a conversation?"
+
+4. "Kind regards," on its own line. Nothing after it.
+
+Rules: blank line between paragraphs. No em dashes, no semicolons. No dates or
+weekdays. No name after the sign-off. British English. Use contractions, don't
+and you're rather than do not and you are. Never suggest they have overlooked
+anything. Keep it under 100 words before the sign-off, because there
+is nothing specific to justify length.
+
+Return JSON only:
+{"subject": "...", "body": "..."}
+Subject under nine words, no FX, foreign exchange, currency risk or hedging."""
+
+
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
     s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
@@ -195,12 +240,12 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def call_claude(payload: str, retries: int = 3) -> dict | None:
+def call_claude(payload: str, retries: int = 3, system: str = "") -> dict | None:
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
         return None
     body = json.dumps({
-        "model": MODEL, "max_tokens": 900, "system": SYSTEM,
+        "model": MODEL, "max_tokens": 900, "system": system or SYSTEM,
         "messages": [{"role": "user", "content": payload}],
     }).encode()
     req = urllib.request.Request(
@@ -269,6 +314,43 @@ TELLS = [
 ]
 
 
+# Expanding contractions is the single most reliable tell of machine writing, so
+# it is fixed on the way out rather than left to the prompt. Only forms that are
+# unambiguous in context are contracted: "we are" is safe, "it is" before a noun
+# is not always, so it is left alone.
+CONTRACTIONS = [
+    (r"\bdo not\b", "don't"), (r"\bdoes not\b", "doesn't"),
+    (r"\bdid not\b", "didn't"), (r"\bis not\b", "isn't"),
+    (r"\bare not\b", "aren't"), (r"\bwas not\b", "wasn't"),
+    (r"\bwere not\b", "weren't"), (r"\bhas not\b", "hasn't"),
+    (r"\bhave not\b", "haven't"), (r"\bhad not\b", "hadn't"),
+    (r"\bwill not\b", "won't"), (r"\bwould not\b", "wouldn't"),
+    (r"\bcould not\b", "couldn't"), (r"\bshould not\b", "shouldn't"),
+    (r"\bcannot\b", "can't"), (r"\bcan not\b", "can't"),
+    (r"\byou are\b", "you're"), (r"\bwe are\b", "we're"),
+    (r"\bthey are\b", "they're"), (r"\byou have\b", "you've"),
+    (r"\bwe have\b", "we've"), (r"\bI have\b", "I've"),
+    (r"\bI am\b", "I'm"), (r"\bthat is\b", "that's"),
+    (r"\bthere is\b", "there's"), (r"\bwhat is\b", "what's"),
+    (r"\bwe will\b", "we'll"), (r"\byou will\b", "you'll"),
+]
+
+
+def contract(text: str) -> str:
+    """Contract expanded forms, preserving the case of the first letter."""
+    def swap(m):
+        rep = m.group(0)
+        for pat, r in CONTRACTIONS:
+            if re.fullmatch(pat, m.group(0), re.I):
+                rep = r
+                break
+        return rep[0].upper() + rep[1:] if m.group(0)[0].isupper() else rep
+
+    for pat, _ in CONTRACTIONS:
+        text = re.sub(pat, swap, text, flags=re.I)
+    return text
+
+
 def find_tells(text: str) -> list[str]:
     import re as _re
     return [label for pat, label in TELLS if _re.search(pat, text, _re.I)]
@@ -296,6 +378,8 @@ def main() -> int:
     ap.add_argument("--priority", default="P1,P2,P3",
                     help="only write emails for these, or ALL")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--include-thin", action="store_true",
+                    help="also write short sector emails for P4 and X companies")
     args = ap.parse_args()
 
     sys.path.insert(0, str(Path(__file__).parent))
@@ -364,12 +448,21 @@ def main() -> int:
             continue
 
         brief = brief_for(acct)
-        if not brief.strip():
+        thin = str(pri).startswith(("P4", "X"))
+        if thin:
+            # Nothing quotable, so send only what is safe to assert: what they
+            # do and the sector. Needs at least that much to be worth sending.
+            what = str(acct.get("one_liner", "")).strip()
+            if not what or not args.include_thin:
+                skipped += 1
+                continue
+            brief = f"Company: {acct.get('company','')}\nWhat they do: {what}"
+        elif not brief.strip():
             skipped += 1
             continue
 
         first = c["name"].split()[0] if c["name"] else ""
-        out = call_claude(brief)
+        out = call_claude(brief, system=THIN_SYSTEM if thin else "")
         if not out or not out.get("body"):
             failed += 1
             continue
@@ -393,7 +486,7 @@ def main() -> int:
         paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
         paras = [p for p in paras if p.lower().rstrip(",.") not in
                  ("kind regards", "best regards", "regards", "best")]
-        body = "\n\n".join(paras) + "\n\nKind regards,"
+        body = contract("\n\n".join(paras)) + "\n\nKind regards,"
 
         rows.append({
             "company": acct.get("company", c["company"]),
@@ -406,7 +499,9 @@ def main() -> int:
             "turnover": acct.get("turnover", ""),
             "ch_number": acct.get("number", ""),
             "check": "; ".join(find_tells(out.get("subject", "") + " " + body))
-                     or confidence(acct),
+                     or ("thin - sector email, no figures" if thin
+                         else confidence(acct)),
+            "template": "sector" if thin else "accounts",
         })
         if i % 10 == 0:
             print(f"  written {len(rows)}/{i}", flush=True)
