@@ -90,23 +90,114 @@ OCR_KEEP = re.compile(
 OCR_CONFIG = ""             # default tesseract config: psm 6 lost text from tables
 OCR_ENOUGH = 10_000_000     # effectively off: notes to the accounts are at the BACK
 
-# FX scan patterns (unchanged from v3.1)
+# ---------------------------------------------------------------------------
+# FX scan patterns
+#
+# Two problems the earlier version had, both measured across 1,870 cached
+# companies:
+#
+#   49% of "active hedger" hits contradicted the brief, because nearly every
+#   set of FRS 102 accounts contains the sentence "Derivatives, including
+#   forward foreign exchange contracts, are not basic financial instruments".
+#   That is a definition, not a holding.
+#
+#   71% of "FX P&L line present" hits had no figure, because "foreign exchange
+#   gains and losses are recognised in profit or loss" is also boilerplate.
+#
+# So patterns now come in three kinds: BOILERPLATE, which is stripped from the
+# text before anything else runs; DENIALS, which override everything; and
+# PATTERNS, several of which now require a nearby number.
+# ---------------------------------------------------------------------------
+
+# Sentences that appear in a large share of UK filings regardless of whether
+# the company has ever touched a foreign currency. Removed before scanning.
+BOILERPLATE = re.compile(
+    r"derivatives,?\s*(including[^.]{0,80})?are not basic financial instruments[^.]*\.|"
+    r"(foreign exchange|exchange) (gains? and losses?|differences?)[^.]{0,60}"
+    r"(are|is) recognised in (profit or loss|the profit and loss account|"
+    r"the statement of comprehensive income)[^.]*\.|"
+    r"monetary (assets and liabilities|items)[^.]{0,80}denominated in foreign "
+    r"currencies are (re)?translated[^.]*\.|"
+    r"transactions in foreign currencies are (recorded|translated)[^.]{0,80}"
+    r"(rate|rates) (ruling|prevailing)[^.]*\.|"
+    r"non-monetary items[^.]{0,80}measured (at|using) (fair value|historical cost)[^.]*\.|"
+    r"unless hedge accounting is applied[^.]*\.|"
+    r"if hedge accounting is applied[^.]*\.|"
+    r"details of hedges, hedging fair value changes[^.]*\.|"
+    r"derivatives are initially recognised at fair value on the date[^.]*\.|"
+    r"the (company|group) has chosen to apply the recognition and measurement[^.]*\.",
+    re.I | re.S,
+)
+
+# An explicit statement that there is no exposure. These beat every positive
+# signal: Soanes Poultry said "the company does not deal in any foreign
+# currencies" and still came back P1 - exposed.
+DENIALS = re.compile(
+    r"do(es)? not deal in any foreign currenc|"
+    r"no exposure to (foreign )?(exchange|currency)|"
+    r"(has|have) minimal exposure to exchange|"
+    r"not exposed to (significant |material )?(foreign )?(currency|exchange) risk|"
+    r"all (sales and purchases|transactions|trade) are (denominated )?in sterling|"
+    r"(sales and purchases|transactions) are (dominated|denominated) in sterling|"
+    r"transacts exclusively in sterling|"
+    r"the (company|group) does not (purchase|buy|sell)[^.]{0,40}foreign currenc|"
+    r"there (is|are) no (material |significant )?(foreign )?(currency|exchange) "
+    r"(risk|exposure)|"
+    r"exposure to (exchange rate|currency) (volatility|fluctuations?) is not "
+    r"(significant|material)|"
+    r"no (significant |material )?transactions (are )?(denominated )?in foreign "
+    r"currenc",
+    re.I,
+)
+
+# A money amount, used where a label alone proves nothing.
+_AMT = r"[£$\u20ac]\s?[\d,]+(\.\d+)?|\b\d{1,3}(,\d{3})+(\.\d+)?\b"
+
 PATTERNS = [
-    (r"forward (foreign )?(currency|exchange) contract", "FORWARD CONTRACTS - active hedger", 10),
-    (r"committed to (pay|sell)\s*[£$€]?[\d,]+", "FORWARD COMMITMENT VALUE stated", 10),
-    (r"hedg\w+", "Mentions hedging", 6),
+    # Real holdings say the company uses, enters into, or is committed to. The
+    # bare phrase on its own is the accounting-policy definition.
+    (r"(uses?|using|entered into|enters into|holds?|held|outstanding|"
+     r"committed to|in place|utilises?)[^.]{0,60}forward (foreign )?"
+     r"(currency|exchange) contract|"
+     r"forward (foreign )?(currency|exchange) contracts?[^.]{0,60}"
+     r"(outstanding|held|in place|were entered|totalling|amounting)",
+     "FORWARD CONTRACTS - active hedger", 10),
+    (r"committed to (pay|sell|buy|purchase)\s*[£$\u20ac]?[\d,]+",
+     "FORWARD COMMITMENT VALUE stated", 10),
+    (rf"(forward|derivative|hedg\w+)[^.]{{0,60}}({_AMT})|"
+     rf"({_AMT})[^.]{{0,40}}(forward|derivative|hedg\w+)",
+     "HEDGE VALUE stated", 8),
+    (r"hedg\w+", "Mentions hedging", 4),
     (r"foreign (currency|exchange) (risk|exposure)", "Names FX risk", 5),
-    (r"exchange (rate )?(loss|gain|losses|gains)", "FX P&L line present", 5),
-    (r"denominated in (a )?foreign currenc", "Foreign currency transactions", 4),
+    # An FX P&L line only counts with a figure beside it.
+    (rf"exchange (rate )?(loss|gain|losses|gains)[^.]{{0,40}}({_AMT})|"
+     rf"({_AMT})[^.]{{0,25}}exchange (rate )?(loss|gain|losses|gains)",
+     "FX P&L FIGURE disclosed", 8),
+    (r"exchange (rate )?(loss|gain|losses|gains)", "FX mentioned in P&L, no figure", 1),
+    (r"denominated in (a )?foreign currenc", "Foreign currency transactions", 3),
     (r"currency risk", "Currency risk section", 4),
+    (r"(purchas\w+|suppliers?|imports?)[^.]{0,50}(denominated in|priced in|"
+     r"paid in)[^.]{0,20}(euro|dollar|usd|eur|yen|renminbi)",
+     "PURCHASE-SIDE exposure named", 9),
+    (r"(sales?|revenue|customers?|exports?)[^.]{0,50}(denominated in|invoiced in|"
+     r"received in)[^.]{0,20}(euro|dollar|usd|eur|yen|renminbi)",
+     "REVENUE-SIDE exposure named", 9),
     (r"import|export", "Imports/exports mentioned", 2),
-    (r"minimal exposure to exchange", "DISQUALIFIER: says minimal exposure", -8),
-    (r"invoice (discount|financ)|supplier (discount|financ)|debtor financ", "Invoice/supplier finance (cash tight)", 3),
-    (r"directors?['\u2019]? loans? to the company|due to key management", "Directors lending in (cash tight)", 2),
-    # v4: overseas parent flag
-    (r"(ultimate )?parent (company|undertaking).{0,60}(incorporated|registered) in (?!england|wales|scotland|the uk|united kingdom|northern ireland)", "OVERSEAS PARENT - FX may be group-level", 3),
-    (r"consolidated (financial statements|accounts) of .{0,40}(gmbh|s\.?a\.?|b\.?v\.?|inc\.?|llc|ag|spa|s\.?r\.?l)", "Foreign parent consolidates - qualify who controls FX", 3),
+    (r"invoice (discount|financ)|supplier (discount|financ)|debtor financ",
+     "Invoice/supplier finance (cash tight)", 3),
+    (r"directors?['\u2019]? loans? to the company|due to key management",
+     "Directors lending in (cash tight)", 2),
+    (r"(ultimate )?parent (company|undertaking).{0,60}(incorporated|registered) in "
+     r"(?!england|wales|scotland|the uk|united kingdom|northern ireland)",
+     "OVERSEAS PARENT - FX may be group-level", 3),
+    (r"consolidated (financial statements|accounts) of .{0,40}"
+     r"(gmbh|s\.?a\.?|b\.?v\.?|inc\.?|llc|ag|spa|s\.?r\.?l)",
+     "Foreign parent consolidates - qualify who controls FX", 3),
 ]
+
+DENIAL_LABEL = "DENIAL: accounts state no FX exposure"
+DENIAL_SCORE = -25          # enough to sink any keyword-only positive
+
 
 session = requests.Session()
 session.auth = (_ch_key(), "")
@@ -494,14 +585,36 @@ def text_from_pdf(path: Path):
 
 def scan_text(text: str):
     lower = text.lower()
+
+    # An explicit denial is checked against the original text, since the
+    # sentence saying "does not deal in any foreign currencies" must not be
+    # removed as boilerplate. It is scored first and heavily, so that keyword
+    # hits elsewhere in the filing cannot outvote the company's own statement.
+    denials = list(re.finditer(DENIALS, lower))
+
+    # Strip standard FRS 102 wording before scanning. Nearly every set of UK
+    # accounts defines how forwards and exchange differences would be treated,
+    # whether or not the company holds any.
+    scanned = BOILERPLATE.sub(" ", lower)
+    removed = len(lower) - len(scanned)
+
     score, findings, excerpts = 0, [], []
+
+    if denials:
+        score += DENIAL_SCORE
+        findings.append(f"{DENIAL_LABEL} (x{len(denials)})")
+        d = denials[0]
+        excerpts.append(" ".join(text[max(0, d.start() - 100):d.end() + 140].split()))
+
     for pattern, label, weight in PATTERNS:
-        matches = list(re.finditer(pattern, lower))
+        matches = list(re.finditer(pattern, scanned))
         if matches:
             score += weight
             findings.append(f"{label} (x{len(matches)})")
             m = matches[0]
             excerpts.append(" ".join(text[max(0, m.start() - 120):m.end() + 160].split()))
+    if removed > 400:
+        findings.append(f"[{removed} chars of accounting boilerplate ignored]")
     turnover = ""
     m = re.search(r"turnover[^\d£$€]{0,40}[£$€]?\s?([\d,]{6,})", lower)
     if m:
