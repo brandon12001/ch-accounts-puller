@@ -606,7 +606,7 @@ def main() -> int:
     wanted = None if args.priority.upper() == "ALL" else tuple(
         p.strip() for p in args.priority.split(",") if p.strip())
 
-    rows, skipped, failed = [], 0, 0
+    rows, skipped, failed, blocked_owner = [], 0, 0, 0
     for i, c in enumerate(contacts, 1):
         acct = lookup(c["company"], c.get("number", ""))
         if not acct:
@@ -615,6 +615,12 @@ def main() -> int:
         pri = ch_classify.priority(acct) if HAS_CLASSIFY else ""
         if wanted and not str(pri).startswith(wanted):
             skipped += 1
+            continue
+        # A listed plc or a company under a foreign parent will not have the
+        # decision sitting with the person on the contact record, so there is
+        # no point writing to them however good the accounts look.
+        if HAS_CLASSIFY and not ch_classify.winnable(acct):
+            blocked_owner += 1
             continue
 
         brief = brief_for(acct)
@@ -689,6 +695,7 @@ def main() -> int:
 
     print(f"\n{len(rows)} emails written to {args.out}")
     print(f"  skipped (no accounts data or wrong priority): {skipped}")
+    print(f"  skipped (listed, too large, or parent controls FX): {blocked_owner}")
     print(f"  failed (model error): {failed}")
     flagged = [r for r in rows if r["check"] != "ok"]
     if flagged:
