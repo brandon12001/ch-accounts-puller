@@ -52,7 +52,7 @@ THE SHAPE, in order, always five parts:
    This paragraph changes depending on what they do about currency. See the
    branches below.
 3. The Lumon paragraph, close to verbatim:
-   "At Lumon we don't just try to beat your existing providers on margins. We
+   "At Lumon we don't just try to beat your existing providers on pricing. We
    build bespoke hedging strategies that minimise risk and maximise flexibility
    and upside potential, with no deposits or margin calls."
 4. The conditional close, worded exactly like this:
@@ -66,10 +66,11 @@ THE SHAPE, in order, always five parts:
 BRANCHES for paragraph 2. Pick the one that fits the account:
 
 IF they hold no instruments and an exchange gain or loss is disclosed:
-  Lead on the figure. The point is that the number moved without anyone
-  deciding it should, and the next one is a coin toss.
-  e.g. "That is a number nobody chose. It moved because the rate moved, on
-  goods you had already priced."
+  Lead on the figure, then say plainly what it was: the rate moving on goods
+  already priced. State it, do not dramatise it.
+  e.g. "That came from the rate moving between agreeing the price and paying
+  for the goods." Never write "a number nobody chose", "that wasn't a decision",
+  "that's not a rounding error" or any line written for effect.
 
 IF they hold no instruments and no figure is disclosed:
   The exposure itself is the story. Price agreed in one currency, paid in
@@ -157,6 +158,9 @@ ABSOLUTE RULES:
 - No meeting dates, no days of the week. The close is a question.
 - No name after "Kind regards," and no regulatory footer.
 - British English.
+- Every money figure carries its symbol. Write "£413,686" not "413,686", in the
+  body and in the subject line. Use the currency the accounts state, so euro
+  figures take a euro sign.
 - Use contractions the way a person typing an email does: don't, doesn't, won't,
   you're, we're, it's, that's, I've, you've, there's, isn't, hasn't, wasn't.
   Writing "do not" and "you are" in full is the clearest sign an email was
@@ -175,9 +179,18 @@ BANNED WORDS AND PHRASES, these read as machine-written:
   "it's worth noting", "that said", "moreover", "furthermore", "additionally"
   "crucial", "vital", "pivotal", "game-changer", "transformative"
   "Let's face it", "The reality is", "Here's the thing"
-  "not only... but also", "isn't just... it's"
+  "not only... but also"
+  the whole contrastive family: "that's not X, it's Y", "this isn't about X,
+    it's about Y", "it's not the rate, it's the timing", "less about X, more
+    about Y", "not so much X as Y". Say the thing you mean and stop. If you
+    find yourself setting up a contrast to make a point land, cut the first
+    half and keep the second.
   rhetorical questions used as filler
   three-item lists used for rhythm rather than meaning
+  short dramatic sentences written for effect: "That is a number nobody chose",
+    "That was not a decision", "That is not a rounding error", "And that is the
+    problem", "Which is the point"
+  any sentence whose job is emphasis rather than information
   starting consecutive sentences the same way
   any sentence that could appear in an email to any company
 
@@ -187,9 +200,22 @@ was written to sound good, cut it.
 
 Return JSON only, no other text:
 {"subject": "...", "body": "..."}
-Use \n\n between paragraphs. The subject must be under nine words, must not
-contain FX, foreign exchange, currency risk or hedging, and should quote their
-own number or their own wording where possible."""
+Use \n\n between paragraphs.
+
+THE SUBJECT LINE. It decides whether the email is opened, so it carries the one
+thing a stranger could not know: something from their own accounts.
+
+- Under nine words.
+- Quote their own figure or their own wording wherever there is one.
+  Good: "The 339,678 in your FY25 accounts"
+  Good: "Your two month cover and Baltic lead times"
+  Good: "Your euro forwards and what happens after you book"
+- Never a question mark. Questions in subject lines read as marketing.
+- Never the company name. "Arden Fine Foods, a quick question" is the shape
+  every mail merge takes and people recognise it instantly.
+- Never FX, foreign exchange, currency risk, hedging, or the word Lumon.
+- No greeting words, no "quick question", no "following up", no "opportunity".
+- Sentence case, not title case. Lower case after the first word."""
 
 
 THIN_SYSTEM = """You write cold emails for Brandon Ellis, a senior sales executive
@@ -210,7 +236,7 @@ Four paragraphs, in this order:
    receiving payments from overseas customers, or both.
 
 2. The Lumon paragraph, close to verbatim:
-   "At Lumon we don't just try to beat your existing providers on margins. We
+   "At Lumon we don't just try to beat your existing providers on pricing. We
    build bespoke hedging strategies that minimise risk and maximise flexibility
    and upside potential, with no deposits or margin calls."
 
@@ -229,7 +255,30 @@ is nothing specific to justify length.
 
 Return JSON only:
 {"subject": "...", "body": "..."}
-Subject under nine words, no FX, foreign exchange, currency risk or hedging."""
+Subject under nine words. No question mark, no company name, no FX, foreign
+exchange, currency risk, hedging or the word Lumon. Sentence case. Describe the
+flow rather than the product, e.g. "Paying suppliers overseas"."""
+
+
+def _richness(rec: dict) -> int:
+    """How useful a cache record is, for picking between duplicates."""
+    score = 0
+    for f, w in (("call_ammo", 3), ("turnover", 2), ("one_liner", 1),
+                 ("hedging_instruments", 1), ("currencies_named", 1)):
+        if str(rec.get(f, "")).strip():
+            score += w
+    return score
+
+
+def squash(s: str) -> str:
+    """Normalised with all spaces removed.
+
+    Salesforce and Companies House disagree constantly about spacing and
+    initials: MJAllen against M.J. ALLEN, Meadowvale against Meadow Vale,
+    Eurowrap against EURO WRAP, PJ Nicholls against P.J. NICHOLLS. Collapsing
+    to a single token makes all of those the same string.
+    """
+    return norm(s).replace(" ", "")
 
 
 def norm(s: str) -> str:
@@ -305,8 +354,21 @@ TELLS = [
      "inflated adjective"),
     (r"\bLet'?s face it\b|\bThe reality is\b|\bHere'?s the thing\b", "false opener"),
     (r"not only\b[^.]{0,60}\bbut also\b", "not only but also"),
-    (r"\bisn'?t just\b[^.]{0,40}\bit'?s\b", "isn't just, it's"),
+    # The whole "not X, it's Y" family. It is the most recognisable machine
+    # construction there is, and it turns up in a dozen shapes.
+    (r"\b(that|this|it|which)('?s| is| was)? ?(not|isn'?t|wasn'?t) "
+     r"(just |simply |only |really |about )?[^.;!?]{2,50}[,.] ?(it'?s|that'?s|"
+     r"they'?re|this is|it is)\b", "not X it's Y construction"),
+    (r"\b(isn'?t|aren'?t|wasn'?t|is not) (just|simply|only) about\b[^.]{0,50}"
+     r"\b(it'?s|but) about\b", "not just about, it's about"),
+    (r"\bnot (so much|as much)\b[^.]{0,40}\b(as|but)\b", "not so much as"),
+    (r"\bless about\b[^.]{0,40}\bmore about\b", "less about, more about"),
+    (r"\bit'?s not\b[^.]{0,40}\bthat matters\b", "it's not X that matters"),
     (r"\b(Monday|Tuesday|Wednesday|Thursday|Friday)\b", "weekday, no dates in bulk"),
+    (r"\b(that|this|it)('?s| is| was| wasn'?t| isn'?t)? ?(a )?number nobody|"
+     r"\bnobody (chose|decided|picked)|that (was|is)n'?t a decision|"
+     r"not a rounding error|and that('?s| is) the (problem|point)|"
+     r"which is (the|exactly the) point", "dramatic line written for effect"),
     (r"most (companies|businesses)|many (companies|businesses) (do not|don'?t)|"
      r"nobody (measures|owns|decides)|often overlook|tend to overlook|"
      r"fail to (realise|consider)|may not (realise|be aware)",
@@ -336,6 +398,23 @@ CONTRACTIONS = [
 ]
 
 
+# The model drops currency symbols surprisingly often, and a bare "413,686"
+# in a subject line looks like a mistake. Money-shaped numbers get the symbol
+# put back, unless something already precedes them.
+MONEY = re.compile(r"(?<![\d£$\u20ac.,])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+m\b)")
+
+
+def add_symbol(text: str, symbol: str = "\u00a3") -> str:
+    def swap(m):
+        before = text[max(0, m.start() - 12):m.start()].lower()
+        # leave alone anything that is plainly not money
+        if any(w in before for w in ("company number", "registered", "no. ", "fy",
+                                     "year ", "20")):
+            return m.group(0)
+        return symbol + m.group(0)
+    return MONEY.sub(swap, text)
+
+
 def contract(text: str) -> str:
     """Contract expanded forms, preserving the case of the first letter."""
     def swap(m):
@@ -356,16 +435,36 @@ def find_tells(text: str) -> list[str]:
     return [label for pat, label in TELLS if _re.search(pat, text, _re.I)]
 
 
-def confidence(row: dict) -> str:
-    """Flag rows worth reading before they go out."""
-    has_number = bool(re.search(r"\d", str(row.get("fx_pnl_figures", ""))
-                                + str(row.get("hedging_instruments", ""))
-                                + str(row.get("export_split", ""))))
+def check_subject(subject: str, company: str) -> list[str]:
+    """The subject decides whether it is opened, so it gets its own checks."""
+    out = []
+    if "?" in subject:
+        out.append("question mark in subject")
+    if len(subject.split()) >= 9:
+        out.append("subject too long")
+    if re.search(r"\b(fx|foreign exchange|currency risk|hedging|lumon)\b", subject, re.I):
+        out.append("banned word in subject")
+    words = [w for w in re.sub(r"[^a-z ]", " ", company.lower()).split() if len(w) > 4]
+    if any(w in subject.lower() for w in words):
+        out.append("company name in subject")
+    return out
+
+
+def confidence(row: dict, body: str = "") -> str:
+    """Flag rows worth reading before they go out.
+
+    Judged on the email that was actually written, not on which cache fields
+    happen to be populated. An email quoting three figures from the accounts is
+    fine even if fx_pnl_figures was blank.
+    """
     if not str(row.get("call_ammo", "")).strip():
         return "review - nothing from the accounts"
-    if not str(row.get("turnover", "")).strip():
-        return "review - no turnover"
-    return "ok" if has_number else "review - no hard figure"
+    figures = len(re.findall(r"[\u00a3\u20ac$]\s?\d", body))
+    if figures == 0:
+        return "review - no figures in the email"
+    if figures == 1 and not str(row.get("turnover", "")).strip():
+        return "review - one figure, no turnover on file"
+    return "ok"
 
 
 def main() -> int:
@@ -378,6 +477,8 @@ def main() -> int:
     ap.add_argument("--priority", default="P1,P2,P3",
                     help="only write emails for these, or ALL")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--no-cache-ok", action="store_true",
+                    help="proceed even if the cache is empty")
     ap.add_argument("--include-thin", action="store_true",
                     help="also write short sector emails for P4 and X companies")
     args = ap.parse_args()
@@ -410,14 +511,78 @@ def main() -> int:
     print(f"{len(contacts)} contacts", flush=True)
 
     cache = ch_cache.load_cache(args.cache)
-    by_name = {}
+    if not cache:
+        print(f"WARNING: no records loaded from {args.cache}.", flush=True)
+        print("Either the file is missing from the repo or the commit step failed "
+              "on the triage run. Every company will be re-triaged, which costs "
+              "time and credits for work already done.", flush=True)
+        if not args.no_cache_ok:
+            print("Stopping. Re-run with --no-cache-ok to triage from scratch "
+                  "anyway.", flush=True)
+            return 1
+    else:
+        companies = len({id(r) for r in cache.values()})
+        print(f"cache holds {companies} companies", flush=True)
+
+    # Index every way a contact might refer to the same company. The cache
+    # stores both the name we searched and the name Companies House matched,
+    # and those often differ ("Top Tubes Ltd" vs "TOP TUBES LIMITED").
+    by_name: dict[str, dict] = {}
+    by_number: dict[str, dict] = {}
+
+    def index(key: str, rec: dict) -> None:
+        if not key:
+            return
+        # prefer the richer record when the same key appears twice
+        old = by_name.get(key)
+        if old is None or _richness(rec) > _richness(old):
+            by_name[key] = rec
+
     for rec in cache.values():
-        k = norm(rec.get("company", ""))
-        if k and (k not in by_name or str(rec.get("turnover", "")).strip()):
-            by_name[k] = rec
+        num = str(rec.get("number", "")).strip()
+        if num:
+            by_number[num] = rec
+        for field in ("company", "matched_name"):
+            index(norm(rec.get(field, "")), rec)
+            index(squash(rec.get(field, "")), rec)
+        # also index without the leading "the", and on the first two words,
+        # which catches "Lawton Tubes" against "LAWTON TUBES LIMITED"
+        base = norm(rec.get("company", ""))
+        if base.startswith("the "):
+            index(base[4:], rec)
+        words = base.split()
+        if len(words) > 2:
+            index(" ".join(words[:2]), rec)
+
+
+    def lookup(company: str, number: str = "") -> dict | None:
+        if number and number.strip() in by_number:
+            return by_number[number.strip()]
+        k = norm(company)
+        if k in by_name:
+            return by_name[k]
+        if squash(company) in by_name:
+            return by_name[squash(company)]
+        if k.startswith("the ") and k[4:] in by_name:
+            return by_name[k[4:]]
+        words = k.split()
+        # try progressively shorter prefixes, then a unique substring match
+        for n in range(len(words) - 1, 1, -1):
+            cand = " ".join(words[:n])
+            if cand in by_name:
+                return by_name[cand]
+        if len(k) > 6:
+            hits = [v for kk, v in by_name.items()
+                    if kk.startswith(k) or k.startswith(kk)]
+            uniq = {id(h) for h in hits}
+            if len(uniq) == 1:
+                return hits[0]
+        return None
 
     # triage anything not already read
-    missing = [c for c in contacts if norm(c["company"]) not in by_name]
+    matched = sum(1 for c in contacts if lookup(c["company"], c.get("number", "")))
+    print(f"{matched}/{len(contacts)} contacts matched to cached accounts", flush=True)
+    missing = [c for c in contacts if not lookup(c["company"], c.get("number", ""))]
     if missing and not args.no_triage:
         print(f"{len(missing)} companies not yet read, triaging them now", flush=True)
         import ch_engine as eng
@@ -427,7 +592,12 @@ def main() -> int:
             except Exception as exc:
                 res = eng.blank_result(c["company"])
                 res["error"] = f"crashed: {exc}"
-            by_name[norm(c["company"])] = res
+            for field in ("company", "matched_name"):
+                k = norm(res.get(field, "")) or norm(c["company"])
+                if k:
+                    by_name[k] = res
+            if res.get("number"):
+                by_number[str(res["number"])] = res
             print(f"  [{i}/{len(missing)}] {c['company'][:44]:46} "
                   f"{res.get('grade') or res.get('error','')[:30]}", flush=True)
     elif missing:
@@ -438,7 +608,7 @@ def main() -> int:
 
     rows, skipped, failed = [], 0, 0
     for i, c in enumerate(contacts, 1):
-        acct = by_name.get(norm(c["company"]))
+        acct = lookup(c["company"], c.get("number", ""))
         if not acct:
             skipped += 1
             continue
@@ -486,21 +656,25 @@ def main() -> int:
         paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
         paras = [p for p in paras if p.lower().rstrip(",.") not in
                  ("kind regards", "best regards", "regards", "best")]
-        body = contract("\n\n".join(paras)) + "\n\nKind regards,"
+        cur = "\u20ac" if re.search(r"\beur\b|euro", str(acct.get("currencies_named", "")), re.I) \
+              and not re.search(r"\bgbp\b|sterling", str(acct.get("turnover", "")), re.I) else "\u00a3"
+        body = add_symbol(contract("\n\n".join(paras))) + "\n\nKind regards,"
 
         rows.append({
             "company": acct.get("company", c["company"]),
             "name": c["name"], "first_name": first, "email": c["email"],
             "title": c["title"], "phone": c["phone"],
             "greeting": f"Hi {first}," if first else "Hi,",
-            "subject": out.get("subject", "").strip(),
+            "subject": add_symbol(out.get("subject", "").strip()),
             "body": body,
             "priority": pri,
             "turnover": acct.get("turnover", ""),
             "ch_number": acct.get("number", ""),
-            "check": "; ".join(find_tells(out.get("subject", "") + " " + body))
+            "check": "; ".join(find_tells(body)
+                               + check_subject(out.get("subject", ""),
+                                               acct.get("company", "")))
                      or ("thin - sector email, no figures" if thin
-                         else confidence(acct)),
+                         else confidence(acct, body)),
             "template": "sector" if thin else "accounts",
         })
         if i % 10 == 0:
