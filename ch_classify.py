@@ -106,9 +106,28 @@ def parent_control(row) -> str:
     return "unknown"
 
 
+# A listed group is its own parent, so parent_control returns "none" and the
+# ownership filter waves it through. But a plc of this size runs treasury
+# centrally, and the person on the contact record will not be deciding.
+LISTED = re.compile(r"\bplc\b|\bp\.l\.c\b|listed|london stock exchange|"
+                    r"\bAIM\b|premium listing|main market", re.I)
+BIG = 250_000_000
+
+
+def too_big(row) -> bool:
+    """Listed, or large enough that treasury is a department rather than a person."""
+    blob = " ".join(str(row.get(k, "")) for k in
+                    ("company", "matched_name", "one_liner", "call_ammo"))
+    try:
+        t = float(re.sub(r"[^0-9.]", "", str(row.get("turnover", "")) or "0") or 0)
+    except ValueError:
+        t = 0
+    return bool(LISTED.search(blob)) or t >= BIG
+
+
 def winnable(row) -> bool:
     """Is this a company where the person you reach can actually decide?"""
-    return parent_control(row) in ("none", "uk-holding")
+    return parent_control(row) in ("none", "uk-holding") and not too_big(row)
 
 
 def _txt(row, *keys) -> str:
@@ -180,6 +199,56 @@ def _turnover(row) -> float:
         return 0.0
 
 
+DENIAL_IN_FINDINGS = re.compile(r"DENIAL: accounts state no FX exposure", re.I)
+# The brief is written by a model reading the filing; when it says plainly that
+# there is no exposure, that beats any keyword score. Soanes Poultry stated
+# "the company does not deal in any foreign currencies" and still came back P1.
+DENIAL_IN_PROSE = re.compile(
+    r"do(es)? not deal in any foreign currenc|"
+    r"no exposure to (foreign )?(exchange|currency)|"
+    r"minimal exposure to exchange|"
+    r"all (sales and purchases|transactions) are (denominated )?in sterling|"
+    r"(sales and purchases|transactions) are (dominated|denominated) in sterling|"
+    r"transacts exclusively in sterling|"
+    r"considers? there to be no exposure to currency risk|"
+    r"does not (deal|trade) in (any )?foreign currenc|"
+    r"does not (purchase|buy|sell|engage in [a-z]+)[^.]{0,50}foreign currenc|"
+    r"thereby avoiding exposure to foreign exchange|"
+    r"avoid(ing|s)? exposure to (foreign )?(exchange|currency)|"
+    r"no (material |significant )?(foreign )?(currency|exchange) (risk|exposure)|"
+    r"not exposed to (significant |material )?(foreign )?(currency|exchange)",
+    re.I,
+)
+
+
+# The brief is written after reading the filing; when it says the regex signal
+# was not borne out, believe the brief. PJ Nicholls was flagged an active hedger
+# by a keyword while its own brief said "no forward contracts or hedging
+# instruments evidenced in accounts despite regex signal".
+BRIEF_OVERRULES = re.compile(
+    r"despite (the )?regex signal|"
+    r"no (forward contracts?|hedging instruments?|derivatives?)[^.]{0,60}"
+    r"(evidenced|held|disclosed|identified|in place)|"
+    r"(hedging instruments?|forward contracts?)[^.]{0,30}not (held|used|evidenced)|"
+    r"no evidence of (actual |active )?(forward|hedging|derivative)",
+    re.I,
+)
+
+
+def brief_contradicts_hedger(row) -> bool:
+    """The written brief says the hedging signal was a false positive."""
+    return bool(BRIEF_OVERRULES.search(str(row.get("call_ammo", ""))))
+
+
+def denies_fx(row) -> bool:
+    """Has the company said in its own accounts that it has no FX exposure?"""
+    if DENIAL_IN_FINDINGS.search(str(row.get("findings", ""))):
+        return True
+    blob = " ".join(str(row.get(k, "")) for k in
+                    ("call_ammo", "excerpts", "one_liner", "hedging_instruments"))
+    return bool(DENIAL_IN_PROSE.search(blob))
+
+
 def priority(row) -> str:
     """Sortable rank. Ordered by how winnable the meeting is, not by filing size.
 
@@ -189,6 +258,9 @@ def priority(row) -> str:
     P4  probably exposed, filing too thin to prove it. Qualify by phone.
     X   accounts state there is no exposure, or nothing readable.
     """
+    # An explicit denial outranks every positive signal below.
+    if denies_fx(row):
+        return "X - accounts say no exposure"
     ev, pos, conf, t = fx_evidence(row), fx_position(row), confidence(row), _turnover(row)
 
     if ev == "denied":
@@ -212,10 +284,11 @@ def priority(row) -> str:
         return "P2 - partly covered"
     if pos == "unhedged" and ev == "implied" and big:
         return "P2 - partly covered"
-    if pos == "hedged" and ev == "quantified" and (big or real):
-        return "P3 - established hedger"
-    if pos == "hedged" and (big or real):
-        return "P3 - established hedger"
+    if pos == "hedged" and not brief_contradicts_hedger(row):
+        if ev == "quantified" and (big or real):
+            return "P3 - established hedger"
+        if big or real:
+            return "P3 - established hedger"
     if conf in ("low", "none"):
         return "P4 - thin filing, qualify by phone"
     if ev in ("stated", "implied"):
