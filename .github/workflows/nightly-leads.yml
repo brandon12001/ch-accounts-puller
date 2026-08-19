@@ -1,0 +1,211 @@
+name: Nightly lead run
+
+# Keeps the call sheet topped up without anyone pressing a button.
+#
+# Every weeknight it picks the next vertical in rotation, pulls companies from
+# Companies House, triages them, and writes a dated call sheet. The cache means
+# a vertical never returns the same company twice, so the rotation can run
+# indefinitely and always surfaces names not seen before.
+#
+# Rotation is by day of year modulo the number of verticals, so it cycles
+# through all twelve and starts again roughly every two and a half weeks.
+
+on:
+  schedule:
+    # 02:00 UTC Monday to Friday, so the sheet is ready before the desk opens
+    - cron: "0 2 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      vertical:
+        description: "Override the rotation and run this vertical"
+        required: false
+        default: ""
+      max_results:
+        description: "How many full/medium/group filers to find"
+        required: false
+        default: "250"
+
+permissions:
+  contents: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install OCR system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr poppler-utils
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pypdfium2 pdfplumber pytesseract beautifulsoup4 lxml requests pandas
+
+      - name: Pick tonight's vertical
+        id: pick
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import datetime, os
+
+          # Ordered by how well each has performed so far. Food wholesale
+          # returned 29% qualified and import/export 19%, so the food and
+          # goods-handling sectors come round more often than the rest.
+          ROTATION = [
+              "food wholesale",
+              "wholesale import export",
+              "fabricated metal",
+              "food and beverage",
+              "industrial machinery",
+              "food wholesale",
+              "plastics and rubber",
+              "chemicals",
+              "wholesale import export",
+              "electronics and electrical",
+              "furniture and timber",
+              "textiles and apparel",
+              "transport equipment",
+              "glass and ceramics",
+          ]
+
+          override = os.environ.get("OVERRIDE", "").strip()
+          if override:
+              choice = override
+          else:
+              day = datetime.date.today().timetuple().tm_yday
+              choice = ROTATION[day % len(ROTATION)]
+          print(f"vertical={choice}")
+          PY
+        env:
+          OVERRIDE: ${{ github.event.inputs.vertical }}
+
+      - name: Discover and triage
+        env:
+          CH_API_KEY: ${{ secrets.CH_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: claude-haiku-4-5
+        run: |
+          echo "tonight: ${{ steps.pick.outputs.vertical }}"
+          python run_discover.py \
+            --vertical "${{ steps.pick.outputs.vertical }}" \
+            --max "${{ github.event.inputs.max_results || '250' }}" \
+            --min-age 10 \
+            --out "nightly_$(date +%Y-%m-%d).csv"
+
+      - name: Build the call sheet
+        run: |
+          python build_call_sheet.py \
+            --contacts "nightly_$(date +%Y-%m-%d).csv" \
+            --cache ch_results_cache.jsonl \
+            --out "call_sheet_$(date +%Y-%m-%d).csv" || \
+            echo "::warning::call sheet step skipped, no contacts column yet"
+
+      # always: a timed-out or failed run must not lose the night's work
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ steps.pick.outputs.vertical }}
+          path: |
+            nightly_*.csv
+            call_sheet_*.csv
+            ch_results_cache.jsonl
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Commit the results cache
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add ch_results_cache.jsonl nightly_*.csv call_sheet_*.csv || true
+          git diff --staged --quiet && exit 0
+          git commit -m "nightly: ${{ steps.pick.outputs.vertical }} ${{ github.run_number }}"
+          # a long run means main has moved, so rebase before pushing and fail
+          # loudly rather than silently losing the cache
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+            git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "push attempt $i failed, retrying"
+            sleep $((i * 10))
+          done
+          echo "::error::could not push the results cache after 5 attempts"
+          exit 1
+
+      # Creates a fresh Lusha table for tonight's companies and fills it with
+      # decision-maker contacts, so the morning job is select all and push to
+      # Salesforce rather than pasting company names in by hand.
+      - name: Push companies into a new Lusha table
+        id: lusha
+        if: always()
+        continue-on-error: true
+        env:
+          LUSHA_API_KEY: ${{ secrets.LUSHA_API_KEY }}
+        run: |
+          python push_to_lusha.py \
+            --sheet "call_sheet_$(date +%Y-%m-%d).csv" \
+            --vertical "${{ steps.pick.outputs.vertical }}" \
+            --min-rank 2
+
+      # Emails the sheet so it is on the phone before the desk opens.
+      # Needs two repository secrets:
+      #   MAIL_USERNAME  brandon16006@gmail.com
+      #   MAIL_PASSWORD  a Google app password, not the account password.
+      #                  Generate at myaccount.google.com > Security >
+      #                  2-Step Verification > App passwords. Two-step has to
+      #                  be on before the option appears. It is 16 characters
+      #                  and Google shows it with spaces; paste it without.
+      - name: Email the call sheet
+        if: always()
+        continue-on-error: true      # a mail failure must not fail the run
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          from: Lead run
+          to: brandon879@hotmail.co.uk
+          subject: "Call sheet ${{ steps.pick.outputs.vertical }} - ${{ github.run_number }}"
+          body: |
+            Tonight's vertical: ${{ steps.pick.outputs.vertical }}
+
+            Lusha table (${{ steps.lusha.outputs.contacts_found }} contacts):
+            ${{ steps.lusha.outputs.table_url }}
+
+            Open it, select all, push to Salesforce.
+
+            The call sheet is attached. Columns worth reading first:
+              call_rank  1 is evidence of exposure, 2 is sector and size
+              money      turnover, direction, what happened to margin
+              currency   the FX evidence, or the question to ask instead
+
+            Full results and the cache are in the repo.
+          attachments: call_sheet_*.csv
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Nightly lead run"
+            echo ""
+            echo "Vertical: **${{ steps.pick.outputs.vertical }}**"
+            echo ""
+            if [ -f "call_sheet_$(date +%Y-%m-%d).csv" ]; then
+              echo "Call sheet rows: $(($(wc -l < "call_sheet_$(date +%Y-%m-%d).csv") - 1))"
+            fi
+            if [ -f "nightly_$(date +%Y-%m-%d).csv" ]; then
+              echo "Companies triaged: $(($(wc -l < "nightly_$(date +%Y-%m-%d).csv") - 1))"
+            fi
+            echo ""
+            echo "Download the artifact above, or pull the repo."
+          } >> "$GITHUB_STEP_SUMMARY"
