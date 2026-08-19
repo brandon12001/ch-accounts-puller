@@ -266,6 +266,68 @@ def currency_line(rec: dict) -> str:
 
 
 # --------------------------------------------------------------------------
+# call order
+#
+# priority answers "do the accounts prove currency exposure". That is not the
+# same question as "is this worth ringing". A £38m HGV parts distributor almost
+# certainly buys from Europe; its accounts simply do not say so, because small
+# and medium filings disclose almost nothing. So X means no evidence in the
+# filing, not no exposure.
+# --------------------------------------------------------------------------
+
+# Sectors where imported goods are close to certain, whatever the accounts say.
+_IMPORTS_LIKELY = re.compile(
+    r"wholesal|distribut|import|merchant|stockist|stockhold|"
+    r"manufactur|engineer|fabricat|foundry|castings|precision|machining|"
+    r"packaging|plastics|extrud|steel|alloy|metal|timber|glass|"
+    r"electrical|electronic|component|parts|equipment|machinery|"
+    r"food|produce|seafood|fish|meat|wine|drink|confectioner|bakery|"
+    r"chemical|pharma|textile|apparel|furniture|toy|giftware",
+    re.I,
+)
+# Businesses that genuinely tend to be domestic end to end.
+_DOMESTIC = re.compile(
+    r"\b(recruitment|estate agen|letting|solicitor|accountan|insurance broker|"
+    r"care home|nursery|dental|veterinary|hairdress|salon|gym|leisure centre|"
+    r"pub|restaurant|takeaway|cleaning services|security guard|scaffold|"
+    r"groundwork|civil engineering contractor|housebuild|property develop)\b",
+    re.I,
+)
+
+
+def worth_calling(rec: dict, priority: str) -> tuple[int, str]:
+    """Rank and reason, independent of what the accounts disclose."""
+    p = str(priority)[:2]
+    turnover = str(rec.get("turnover", "")).replace(",", "")
+    try:
+        t = float(turnover)
+    except ValueError:
+        t = 0.0
+
+    if p in ("P1", "P2"):
+        return 1, "evidence of exposure, no cover"
+    if p == "P3":
+        return 3, "already hedges, second-call lead"
+
+    what = " ".join(str(rec.get(k, "")) for k in
+                    ("one_liner", "call_ammo", "sic_codes"))
+
+    if _DOMESTIC.search(what) and not _IMPORTS_LIKELY.search(what):
+        return 5, "looks domestic end to end"
+
+    if _IMPORTS_LIKELY.search(what):
+        if t >= 1e7:
+            return 2, "no disclosure, but sector and size say they buy abroad"
+        if t >= 3e6:
+            return 3, "no disclosure, sector suggests imported goods"
+        return 4, "sector fits but small"
+
+    if t >= 2e7:
+        return 3, "large enough to be worth a qualifying call"
+    if t >= 5e6:
+        return 4, "worth a qualifying call"
+    return 5, "no evidence and nothing to suggest otherwise"
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -301,6 +363,7 @@ def main() -> None:
                 "name": c.get("name", ""), "job_title": c.get("job_title", ""),
                 "company": company, "phone": c.get("phone", ""),
                 "email": c.get("email", ""), "priority": "NOT TRIAGED",
+                "call_rank": 3, "why_call": "not triaged, qualify by phone",
                 "business": "", "money": "", "happening": "",
                 "currency": "not triaged, run the accounts first", "risk": "",
                 "_t": 0,
@@ -308,6 +371,7 @@ def main() -> None:
             continue
         matched += 1
         pri = ch_classify.priority(rec) if HAS_CLASSIFY else rec.get("priority", "")
+        rank, why = worth_calling(rec, pri)
         t = str(rec.get("turnover", "")).replace(",", "")
         rows.append({
             "name": c.get("name", ""),
@@ -316,6 +380,8 @@ def main() -> None:
             "phone": c.get("phone", ""),
             "email": c.get("email", ""),
             "priority": pri,
+            "call_rank": rank,
+            "why_call": why,
             "business": clip(rec.get("one_liner", ""), 120),
             "money": money_line(rec),
             "happening": happening_line(rec),
@@ -326,13 +392,14 @@ def main() -> None:
 
     print(f"{matched}/{len(contacts)} matched to accounts", flush=True)
 
-    order = {"P1": 0, "P2": 1, "P3": 2, "P4": 3, "NO": 4, "X ": 5}
-    rows.sort(key=lambda r: (order.get(str(r["priority"])[:2], 9), -r["_t"]))
+    # sort by whether it is worth ringing, then by size
+    rows.sort(key=lambda r: (r["call_rank"], -r["_t"]))
     for r in rows:
         r.pop("_t")
 
-    cols = ["name", "job_title", "company", "phone", "email", "priority",
-            "business", "money", "happening", "currency", "risk"]
+    cols = ["call_rank", "why_call", "name", "job_title", "company", "phone",
+            "email", "priority", "business", "money", "happening", "currency",
+            "risk"]
     text = ""
     buf = []
     for r in rows:
