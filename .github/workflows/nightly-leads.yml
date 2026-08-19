@@ -1,37 +1,144 @@
 name: Nightly lead run
 
-# Keeps the call sheet topped up without anyone pressing a button.
+# Runs every vertical in parallel overnight so the call list is full by morning.
 #
-# Every weeknight it picks the next vertical in rotation, pulls companies from
-# Companies House, triages them, and writes a dated call sheet. The cache means
-# a vertical never returns the same company twice, so the rotation can run
-# indefinitely and always surfaces names not seen before.
+# The volume target is 500 dials a day. One vertical a night produced about 60
+# qualified companies, nowhere near enough. Twelve in parallel triages roughly
+# 3,000 companies, which at the observed 24% qualification rate and 80% contact
+# hit rate lands around 430 callable people in the Lusha table each morning.
 #
-# Rotation is by day of year modulo the number of verticals, so it cycles
-# through all twelve and starts again roughly every two and a half weeks.
+# Three things make the parallelism safe:
+#
+#   Each job writes its own cache shard. Twelve jobs committing one file to one
+#   branch is how the results cache was lost on 17 August: the push failed, the
+#   error was swallowed by "|| echo nothing to push", and 1,249 companies never
+#   landed. Shards are merged by a single job at the end, so nothing races.
+#
+#   Each job reads the shared cache first, so a company already seen in any
+#   earlier run is skipped before any money is spent reading its accounts.
+#
+#   Companies House allows 600 requests per five minutes per key. Each job makes
+#   roughly five a minute, so twelve jobs sit near 300 per five minutes. Inside
+#   the limit with headroom, but this is the ceiling. Do not add verticals
+#   without spacing the runs or using a second key.
 
 on:
   schedule:
-    # 02:00 UTC Monday to Friday, so the sheet is ready before the desk opens
-    - cron: "0 2 * * 1-5"
+    # 22:00 UTC Sunday to Thursday, so a long run still finishes overnight.
+    # GitHub caps any single job at six hours regardless of when it starts.
+    - cron: "0 22 * * 0-4"
   workflow_dispatch:
     inputs:
-      vertical:
-        description: "Override the rotation and run this vertical"
-        required: false
-        default: ""
       max_results:
-        description: "How many full/medium/group filers to find"
+        description: "Companies per vertical that file FULL/MEDIUM/GROUP accounts"
         required: false
         default: "250"
+      verticals:
+        description: "Comma separated, or blank for all of them"
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
 jobs:
+  # ------------------------------------------------------------------
+  # One job per vertical. fail-fast is off: a bad sector must not take
+  # the rest of the night down with it.
+  # ------------------------------------------------------------------
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        vertical:
+          - "food wholesale"
+          - "wholesale import export"
+          - "fabricated metal"
+          - "food and beverage"
+          - "industrial machinery"
+          - "chemicals"
+          - "plastics and rubber"
+          - "electronics and electrical"
+          - "furniture and timber"
+          - "textiles and apparel"
+          - "transport equipment"
+          - "glass and ceramics"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip if this vertical was not requested
+        id: gate
+        run: |
+          want='${{ github.event.inputs.verticals }}'
+          if [ -z "$want" ] || echo "$want" | grep -qi "${{ matrix.vertical }}"; then
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=no" >> "$GITHUB_OUTPUT"
+            echo "not requested, skipping"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'yes'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install OCR system packages
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr poppler-utils
+
+      - name: Install Python dependencies
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          pip install -r requirements.txt
+          pip install pypdfium2 pdfplumber pytesseract beautifulsoup4 lxml requests pandas
+
+      - name: Discover and triage
+        if: steps.gate.outputs.run == 'yes'
+        env:
+          CH_API_KEY: ${{ secrets.CH_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: claude-haiku-4-5
+        run: |
+          slug=$(echo "${{ matrix.vertical }}" | tr ' ' '_')
+          python run_discover.py \
+            --vertical "${{ matrix.vertical }}" \
+            --max "${{ github.event.inputs.max_results || '250' }}" \
+            --min-age 10 \
+            --out "nightly_${slug}_$(date +%Y-%m-%d).csv"
+          # this job's cache goes to its own shard so the twelve jobs never
+          # contend for one file
+          if [ -f ch_results_cache.jsonl ]; then
+            mkdir -p shards
+            cp ch_results_cache.jsonl "shards/${slug}.jsonl"
+          fi
+
+      - name: Upload this vertical
+        if: always() && steps.gate.outputs.run == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.vertical }}
+          path: |
+            nightly_*.csv
+            shards/*.jsonl
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------------
+  # Single job: merge the shards, build one sheet, fill a Lusha table,
+  # send the email. Runs even if some verticals failed.
+  # ------------------------------------------------------------------
+  collect:
+    needs: discover
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -40,132 +147,99 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install OCR system packages
+      - run: pip install -r requirements.txt && pip install pandas requests
+
+      - name: Download every shard
+        uses: actions/download-artifact@v4
+        with:
+          path: incoming
+          merge-multiple: true
+
+      - name: Merge into one cache and one sheet
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq tesseract-ocr poppler-utils
+          python - <<'PY'
+          import csv, glob, json, pathlib
 
-      - name: Install Python dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pypdfium2 pdfplumber pytesseract beautifulsoup4 lxml requests pandas
+          # merge the shards, keeping the richest record for each company
+          seen = {}
+          paths = ["ch_results_cache.jsonl"]
+          paths += glob.glob("incoming/**/*.jsonl", recursive=True)
+          for path in paths:
+              p = pathlib.Path(path)
+              if not p.exists():
+                  continue
+              for line in p.read_text(encoding="utf-8").splitlines():
+                  if not line.strip():
+                      continue
+                  try:
+                      rec = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  key = str(rec.get("number") or rec.get("company", "")).lower()
+                  if not key:
+                      continue
+                  weight = len(str(rec.get("call_ammo", "")))
+                  cur = seen.get(key)
+                  if cur is None or weight > len(str(cur.get("call_ammo", ""))):
+                      seen[key] = rec
 
-      - name: Pick tonight's vertical
-        id: pick
-        run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import datetime, os
+          with open("ch_results_cache.jsonl", "w", encoding="utf-8") as fh:
+              for rec in seen.values():
+                  fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+          print(f"cache now holds {len(seen)} companies")
 
-          # Ordered by how well each has performed so far. Food wholesale
-          # returned 29% qualified and import/export 19%, so the food and
-          # goods-handling sectors come round more often than the rest.
-          ROTATION = [
-              "food wholesale",
-              "wholesale import export",
-              "fabricated metal",
-              "food and beverage",
-              "industrial machinery",
-              "food wholesale",
-              "plastics and rubber",
-              "chemicals",
-              "wholesale import export",
-              "electronics and electrical",
-              "furniture and timber",
-              "textiles and apparel",
-              "transport equipment",
-              "glass and ceramics",
-          ]
-
-          override = os.environ.get("OVERRIDE", "").strip()
-          if override:
-              choice = override
-          else:
-              day = datetime.date.today().timetuple().tm_yday
-              choice = ROTATION[day % len(ROTATION)]
-          print(f"vertical={choice}")
+          # stack tonight's sheets into one
+          rows, header = [], None
+          for f in sorted(glob.glob("incoming/**/nightly_*.csv", recursive=True)):
+              with open(f, encoding="utf-8-sig", newline="") as fh:
+                  batch = list(csv.DictReader(fh))
+              if batch:
+                  header = header or list(batch[0])
+                  rows.extend(batch)
+          print(f"{len(rows)} companies triaged tonight")
+          if rows:
+              with open("tonight.csv", "w", encoding="utf-8-sig", newline="") as fh:
+                  w = csv.DictWriter(fh, fieldnames=header)
+                  w.writeheader()
+                  w.writerows(rows)
           PY
-        env:
-          OVERRIDE: ${{ github.event.inputs.vertical }}
-
-      - name: Discover and triage
-        env:
-          CH_API_KEY: ${{ secrets.CH_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_MODEL: claude-haiku-4-5
-        run: |
-          echo "tonight: ${{ steps.pick.outputs.vertical }}"
-          python run_discover.py \
-            --vertical "${{ steps.pick.outputs.vertical }}" \
-            --max "${{ github.event.inputs.max_results || '250' }}" \
-            --min-age 10 \
-            --out "nightly_$(date +%Y-%m-%d).csv"
 
       - name: Build the call sheet
         run: |
           python build_call_sheet.py \
-            --contacts "nightly_$(date +%Y-%m-%d).csv" \
+            --contacts tonight.csv \
             --cache ch_results_cache.jsonl \
-            --out "call_sheet_$(date +%Y-%m-%d).csv" || \
-            echo "::warning::call sheet step skipped, no contacts column yet"
+            --out "call_sheet_$(date +%Y-%m-%d).csv"
 
-      # always: a timed-out or failed run must not lose the night's work
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nightly-${{ steps.pick.outputs.vertical }}
-          path: |
-            nightly_*.csv
-            call_sheet_*.csv
-            ch_results_cache.jsonl
-          retention-days: 30
-          if-no-files-found: warn
-
-      - name: Commit the results cache
-        if: always()
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add ch_results_cache.jsonl nightly_*.csv call_sheet_*.csv || true
-          git diff --staged --quiet && exit 0
-          git commit -m "nightly: ${{ steps.pick.outputs.vertical }} ${{ github.run_number }}"
-          # a long run means main has moved, so rebase before pushing and fail
-          # loudly rather than silently losing the cache
-          for i in 1 2 3 4 5; do
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
-            git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
-            echo "push attempt $i failed, retrying"
-            sleep $((i * 10))
-          done
-          echo "::error::could not push the results cache after 5 attempts"
-          exit 1
-
-      # Creates a fresh Lusha table for tonight's companies and fills it with
-      # decision-maker contacts, so the morning job is select all and push to
-      # Salesforce rather than pasting company names in by hand.
       - name: Push companies into a new Lusha table
         id: lusha
-        if: always()
         continue-on-error: true
         env:
           LUSHA_API_KEY: ${{ secrets.LUSHA_API_KEY }}
         run: |
           python push_to_lusha.py \
             --sheet "call_sheet_$(date +%Y-%m-%d).csv" \
-            --vertical "${{ steps.pick.outputs.vertical }}" \
+            --vertical "all verticals" \
             --min-rank 2
 
-      # Emails the sheet so it is on the phone before the desk opens.
-      # Needs two repository secrets:
-      #   MAIL_USERNAME  brandon16006@gmail.com
-      #   MAIL_PASSWORD  a Google app password, not the account password.
-      #                  Generate at myaccount.google.com > Security >
-      #                  2-Step Verification > App passwords. Two-step has to
-      #                  be on before the option appears. It is 16 characters
-      #                  and Google shows it with spaces; paste it without.
+      - name: Commit the merged cache and sheet
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add ch_results_cache.jsonl call_sheet_*.csv || true
+          git diff --staged --quiet && exit 0
+          git commit -m "nightly: all verticals, run ${{ github.run_number }}"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+            git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "push attempt $i failed, retrying"
+            sleep $((i * 10))
+          done
+          echo "::error::could not push the merged cache after 5 attempts"
+          exit 1
+
       - name: Email the call sheet
-        if: always()
-        continue-on-error: true      # a mail failure must not fail the run
+        continue-on-error: true
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -175,37 +249,27 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
           from: Lead run
           to: brandon879@hotmail.co.uk
-          subject: "Call sheet ${{ steps.pick.outputs.vertical }} - ${{ github.run_number }}"
+          subject: "Call sheet - ${{ steps.lusha.outputs.contacts_found }} contacts"
           body: |
-            Tonight's vertical: ${{ steps.pick.outputs.vertical }}
+            Last night's run across all verticals.
 
             Lusha table (${{ steps.lusha.outputs.contacts_found }} contacts):
             ${{ steps.lusha.outputs.table_url }}
 
             Open it, select all, push to Salesforce.
 
-            The call sheet is attached. Columns worth reading first:
-              call_rank  1 is evidence of exposure, 2 is sector and size
-              money      turnover, direction, what happened to margin
-              currency   the FX evidence, or the question to ask instead
-
-            Full results and the cache are in the repo.
+            The call sheet is attached. Read call_rank first:
+              1  evidence of exposure in the accounts, nothing held against it
+              2  no disclosure, but the sector and size say they buy abroad
           attachments: call_sheet_*.csv
 
-      - name: Summary
+      - name: Upload everything
         if: always()
-        run: |
-          {
-            echo "### Nightly lead run"
-            echo ""
-            echo "Vertical: **${{ steps.pick.outputs.vertical }}**"
-            echo ""
-            if [ -f "call_sheet_$(date +%Y-%m-%d).csv" ]; then
-              echo "Call sheet rows: $(($(wc -l < "call_sheet_$(date +%Y-%m-%d).csv") - 1))"
-            fi
-            if [ -f "nightly_$(date +%Y-%m-%d).csv" ]; then
-              echo "Companies triaged: $(($(wc -l < "nightly_$(date +%Y-%m-%d).csv") - 1))"
-            fi
-            echo ""
-            echo "Download the artifact above, or pull the repo."
-          } >> "$GITHUB_STEP_SUMMARY"
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-combined
+          path: |
+            call_sheet_*.csv
+            tonight.csv
+            ch_results_cache.jsonl
+          retention-days: 30
