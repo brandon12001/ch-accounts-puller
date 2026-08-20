@@ -30,10 +30,21 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
+
+import requests
 
 API = "https://api.lusha.com"
+
+# Cloudflare sits in front of the Lusha API and returns 403 with error code
+# 1010 when the client signature looks like a script. urllib's default user
+# agent triggers it every time, so send a browser-shaped one.
+HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+}
 
 # The only filter that reliably returns finance and general management.
 TITLES = [
@@ -62,28 +73,40 @@ def tidy(name: str) -> str:
 
 
 def call(path: str, payload: dict, key: str, method: str = "POST") -> dict:
-    req = urllib.request.Request(
-        f"{API}{path}",
-        data=json.dumps(payload).encode() if payload else None,
-        headers={"api_key": key, "Content-Type": "application/json"},
-        method=method,
-    )
+    headers = dict(HEADERS)
+    headers["api_key"] = key
+    url = f"{API}{path}"
+
     for attempt in range(4):
         try:
-            with urllib.request.urlopen(req, timeout=90) as r:
-                return json.loads(r.read().decode())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()[:300]
-            if e.code == 429:          # rate limited, back off and retry
-                wait = (attempt + 1) * 20
-                print(f"  rate limited, waiting {wait}s", flush=True)
-                time.sleep(wait)
-                continue
-            print(f"  HTTP {e.code}: {body}", flush=True)
-            return {}
-        except Exception as e:                       # noqa: BLE001
+            r = requests.request(method, url, headers=headers,
+                                 json=payload or None, timeout=90)
+        except requests.RequestException as e:
             print(f"  request failed: {e}", flush=True)
             time.sleep(5)
+            continue
+
+        if r.status_code == 429:            # rate limited, back off
+            wait = (attempt + 1) * 20
+            print(f"  rate limited, waiting {wait}s", flush=True)
+            time.sleep(wait)
+            continue
+
+        if r.status_code >= 400:
+            body = r.text[:300]
+            print(f"  HTTP {r.status_code}: {body}", flush=True)
+            if r.status_code == 403 and "1010" in body:
+                print("  (Cloudflare is blocking the client signature)", flush=True)
+            if r.status_code in (401, 403):
+                return {}
+            time.sleep(5)
+            continue
+
+        try:
+            return r.json()
+        except ValueError:
+            print(f"  bad JSON: {r.text[:200]}", flush=True)
+            return {}
     return {}
 
 
