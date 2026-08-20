@@ -249,6 +249,185 @@ def denies_fx(row) -> bool:
     return bool(DENIAL_IN_PROSE.search(blob))
 
 
+_FX_AMOUNT = re.compile(
+    r"(exchange|fx|currency)\s+(gains?|losses?|credit|movement)[^.]{0,40}"
+    r"[£$\u20ac]?\s?\d[\d,]{2,}|"
+    r"[£$\u20ac]\s?\d[\d,]{2,}[^.]{0,30}(exchange|fx|currency)\s+(gains?|losses?)|"
+    r"forward (currency |exchange |usd |eur )?(purchase )?contracts?[^.]{0,40}"
+    r"[£$\u20ac]\s?\d[\d,]{2,}|"
+    r"(committed to (pay|buy|sell)|outstanding|valued at)[^.]{0,25}[£$\u20ac]\s?\d[\d,]{2,}|"
+    r"\d{1,3}%\s+of\s+(stock|purchases?|sales?|turnover)[^.]{0,30}"
+    r"(usd|eur|dollar|euro)",
+    re.I,
+)
+_REAL_INSTRUMENT = re.compile(
+    r"(uses?|using|holds?|held|outstanding|in use|actively hedges?|"
+    r"enters? into|entered into)[^.]{0,50}(forward|currency contract|swap|collar|option)|"
+    r"forward[^.]{0,30}(contracts?|contracts? of)[^.]{0,30}(outstanding|held|in use|valued)",
+    re.I,
+)
+
+
+def has_quantified_fx(row) -> bool:
+    """A real currency figure or forward holding somewhere in the brief."""
+    blob = " ".join(str(row.get(k, "")) for k in
+                    ("call_ammo", "fx_pnl_figures", "hedging_instruments", "est_fx_volume"))
+    if "not disclosed" in blob.lower() and len(blob) < 60:
+        return False
+    return bool(_FX_AMOUNT.search(blob))
+
+
+def holds_instruments(row) -> bool:
+    blob = " ".join(str(row.get(k, "")) for k in ("hedging_instruments", "call_ammo"))
+    if re.search(r"none evident|no hedging instruments|not hedged", blob, re.I) \
+       and not _REAL_INSTRUMENT.search(blob):
+        return False
+    return bool(_REAL_INSTRUMENT.search(blob))
+
+
+_XBRL_ONLY = re.compile(r"taxonomy|metadata|schema|xbrl|listed in .{0,20}tag", re.I)
+_UK_ONLY = re.compile(
+    r"all (turnover|sales|revenue)[^.]{0,40}(arose|are|is)[^.]{0,30}"
+    r"(within |in )?the united kingdom|"
+    r"all sales are to uk|100% (uk|domestic)|"
+    r"no (export|overseas) (revenue|sales|turnover) disclosed",
+    re.I,
+)
+
+
+def has_currency_flow(row) -> bool:
+    """Positive evidence that money actually crosses a currency border.
+
+    Absence of hedging is not evidence of exposure. A UK builders merchant with
+    no forwards is not an unhedged importer, it is a company with nothing to
+    hedge. P1 means "exposed and uncovered", so the exposure has to be shown,
+    not inferred from silence.
+    """
+    fx = str(row.get("fx_pnl_figures", "")).strip().lower()
+    if fx and fx != "not disclosed":
+        return True
+
+    cur = str(row.get("currencies_named", "")).strip()
+    if cur and cur.lower() != "not disclosed" and not _XBRL_ONLY.search(cur):
+        # GBP alone is not a foreign currency
+        if re.search(r"\b(eur|usd|euro|dollar|yen|jpy|chf|aud|cad|nzd|zar|"
+                     r"renminbi|rmb|cny|sek|nok|dkk|pln)\b", cur, re.I):
+            return True
+
+    hedge = str(row.get("hedging_instruments", "")).strip().lower()
+    if hedge and hedge not in ("not disclosed", "none evident"):
+        return True
+
+    exp = str(row.get("export_split", "")).strip().lower()
+    if exp and exp != "not disclosed" and not _UK_ONLY.search(exp):
+        if re.search(r"\d", exp):
+            return True
+
+    est = str(row.get("est_fx_volume", "")).strip()
+    if est.upper().startswith("EST"):
+        return True
+
+    blob = " ".join(str(row.get(k, "")) for k in ("call_ammo", "one_liner", "excerpts"))
+    if _UK_ONLY.search(blob):
+        return False
+    # buying or selling abroad, stated in prose
+    if re.search(r"(import|purchas\w+|sourc\w+|buy\w*)[^.]{0,60}"
+                 r"(overseas|abroad|from (europe|china|the far east|the eu)|"
+                 r"in (euro|dollar|usd|eur))", blob, re.I):
+        return True
+    if re.search(r"(export|sell\w*|sales)[^.]{0,50}(to (europe|the us|overseas)|"
+                 r"overseas|international markets)", blob, re.I):
+        return True
+    return False
+
+
+
+# ---------------------------------------------------------------------------
+# FX evidence gate
+#
+# One definition of "does this company touch foreign currency", shared by every
+# tool. It lived in run_discover only, which meant the triage, the email builder
+# and the call sheet each had their own idea and disagreed with each other.
+#
+# The rule: a company earns a place only if its own filing shows money crossing
+# a border. Absence of hedging is not evidence of exposure, XBRL currency codes
+# are not evidence of anything, and a denial beats every positive signal.
+# ---------------------------------------------------------------------------
+
+_CCY = re.compile(
+    r"\b(eur|usd|euro|dollar|yen|jpy|chf|aud|cad|nzd|zar|sek|nok|dkk|pln|"
+    r"renminbi|rmb|cny|rupee|inr|krona|franc)\b",
+    re.I,
+)
+# Currency codes turn up in the XBRL header of every filing ever made. That is
+# not evidence of anything.
+_XBRL_NOISE = re.compile(
+    r"taxonomy|metadata|schema|xbrl|iso4217|"
+    r"(named|listed|present|referenced) in .{0,24}(tag|taxonomy|metadata|schema)",
+    re.I,
+)
+_FX_WORDS = re.compile(
+    r"foreign (currency|exchange)|exchange (gain|loss|rate|difference)|"
+    r"forward (contract|currency|exchange)|hedg\w+|currency risk|"
+    r"import\w*|export\w*|overseas (suppl|custom|sale|purchas)|"
+    r"denominated in|invoiced in|priced in",
+    re.I,
+)
+_UK_ONLY = re.compile(
+    r"all (turnover|sales|revenue)[^.]{0,40}(arose|are|is)[^.]{0,30}"
+    r"(within |in )?the united kingdom|"
+    r"no (export|overseas) (revenue|sales|turnover)|"
+    r"does not (deal|trade) in (any )?foreign currenc|"
+    r"no exposure to (foreign )?(exchange|currency)",
+    re.I,
+)
+
+
+def fx_evidence(res: dict) -> str:
+    """Why this company looks like it touches foreign currency, or ''."""
+    # a figure in the P&L is the strongest signal there is
+    pnl = str(res.get("fx_pnl_figures", "")).strip()
+    if pnl and pnl.lower() != "not disclosed":
+        return "exchange figure disclosed"
+
+    hedge = str(res.get("hedging_instruments", "")).strip().lower()
+    # The field records what the filing said about instruments, which includes
+    # saying there are none. Caterite reads "none evident - accounts state they
+    # have not entered into any hedging arrangements", and that is a denial,
+    # not evidence. Nil values are the same trap.
+    denies = (hedge.startswith(("none", "not disclosed", "no hedging"))
+              or "not entered into any" in hedge
+              or "does not hedge" in hedge
+              or re.search(r"[£$\u20ac]?\s?nil\b", hedge))
+    if hedge and not denies:
+        return "hedging instruments disclosed"
+
+    cur = str(res.get("currencies_named", "")).strip()
+    if cur and cur.lower() != "not disclosed" and not _XBRL_NOISE.search(cur) \
+       and _CCY.search(cur):
+        return "foreign currencies named"
+
+    exp = str(res.get("export_split", "")).strip()
+    if exp and exp.lower() != "not disclosed" and re.search(r"\d", exp) \
+       and not _UK_ONLY.search(exp):
+        return "export split disclosed"
+
+    est = str(res.get("est_fx_volume", "")).strip()
+    if est.upper().startswith("EST"):
+        return "FX volume estimated from the filing"
+
+    blob = " ".join(str(res.get(k, "")) for k in
+                    ("call_ammo", "excerpts", "findings", "one_liner", "triggers"))
+    if _UK_ONLY.search(blob):
+        return ""
+    if _CCY.search(blob) and _FX_WORDS.search(blob):
+        return "currency and trade language in the accounts"
+    if re.search(r"import|export", str(res.get("one_liner", "")), re.I):
+        return "importer or exporter by description"
+    return ""
+
+
+
 def priority(row) -> str:
     """Sortable rank. Ordered by how winnable the meeting is, not by filing size.
 
@@ -261,6 +440,28 @@ def priority(row) -> str:
     # An explicit denial outranks every positive signal below.
     if denies_fx(row):
         return "X - accounts say no exposure"
+    # A thin filing is not the same as a thin prospect. Small-regime companies
+    # still disclose real figures: itsu grocery reported a £42k exchange gain,
+    # forwards in use and over 30% of purchases in each of USD and EUR, and
+    # still landed in P4 because the filing withheld everything else. A
+    # quantified currency figure or a real forward holding outranks that.
+    if has_quantified_fx(row):
+        return "P3 - established hedger" if holds_instruments(row) \
+               else "P1 - exposed, no cover"
+
+    # No positive evidence of currency flow means this cannot be P1 or P2.
+    # Absence of hedging is not evidence of exposure.
+    if not has_currency_flow(row):
+        cat = str(row.get("accounts_category", "")).lower()
+        if cat in ("full", "medium", "group"):
+            # Full accounts and still nothing about currency means there is
+            # probably nothing there.
+            return "X - no currency flow evident"
+        if cat in ("micro", "dormant") or str(row.get("error", "")):
+            # Never readable in the first place, so leave it where it was.
+            return "X - no evidence"
+        return "P4 - thin filing, qualify by phone"
+
     ev, pos, conf, t = fx_evidence(row), fx_position(row), confidence(row), _turnover(row)
 
     if ev == "denied":
