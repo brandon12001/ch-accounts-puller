@@ -32,7 +32,7 @@ on:
       max_results:
         description: "Companies per vertical that file FULL/MEDIUM/GROUP accounts"
         required: false
-        default: "250"
+        default: "450"
       verticals:
         description: "Comma separated, or blank for all of them"
         required: false
@@ -109,7 +109,7 @@ jobs:
           slug=$(echo "${{ matrix.vertical }}" | tr ' ' '_')
           python run_discover.py \
             --vertical "${{ matrix.vertical }}" \
-            --max "${{ github.event.inputs.max_results || '250' }}" \
+            --max "${{ github.event.inputs.max_results || '450' }}" \
             --min-age 10 \
             --out "nightly_${slug}_$(date +%Y-%m-%d).csv"
           # this job's cache goes to its own shard so the twelve jobs never
