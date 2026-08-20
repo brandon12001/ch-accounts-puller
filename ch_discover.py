@@ -1,211 +1,277 @@
-"""Build prospect lists straight from Companies House, instead of buying them.
+#!/usr/bin/env python3
+"""Find new companies from Companies House, then triage them.
 
-The Lusha pulls have been expensive and poorly targeted. The last one was 374
-contacts of which 234, or 63%, were names already held, and the sub-industry
-tag returned cafes and restaurants rather than importers.
+Replaces buying lists. Companies House advanced search filters on SIC code,
+location, status and incorporation date, free and unlimited, so the candidate
+list is generated rather than purchased.
 
-Companies House exposes an advanced search that filters on SIC code, location,
-company status and incorporation date. It is free and it covers every company
-in the UK. That is a better source of *companies* than any paid list. Lusha is
-still needed for *contacts*, which is what it is actually good at.
+Anything already in the results cache is dropped before triage, so a repeat
+search on the same vertical only ever surfaces companies not seen before.
 
-Typical use:
-
-    names = discover(vertical="fabricated metal", location="Birmingham",
-                     max_results=300)
-    write_run_list(names, "ch_run_birmingham_metal.csv")
-
-Then feed that CSV into the puller as normal.
+    python run_discover.py --vertical "food wholesale" --max 300
+    python run_discover.py --vertical "fabricated metal" --location Birmingham
+    python run_discover.py --sic 46120,46720,46730 --max 200 --discover-only
 """
 
 from __future__ import annotations
 
+import argparse
 import csv
+import sys
 import time
 from pathlib import Path
 
 import requests
 
-BASE = "https://api.company-information.service.gov.uk"
+import ch_discover as disc
 
-# UK SIC 2007 prefixes for the Tier 1 verticals. Prefixes are used rather than
-# full codes because Companies House matches on the full five digits, and
-# listing every one would be unreadable.
-VERTICALS: dict[str, list[str]] = {
-    "food and beverage": [
-        "10110", "10120", "10130", "10200", "10310", "10320", "10390", "10410",
-        "10511", "10512", "10519", "10520", "10611", "10612", "10620", "10710",
-        "10720", "10730", "10820", "10830", "10840", "10850", "10860", "10890",
-        "11010", "11020", "11030", "11040", "11050", "11070",
-    ],
-    "food wholesale": [
-        "46310", "46320", "46330", "46341", "46342", "46350", "46360", "46370",
-        "46380", "46390", "46170",
-    ],
-    "fabricated metal": [
-        "24100", "24200", "24310", "24320", "24330", "24340", "24410", "24420",
-        "24430", "24440", "24450", "25110", "25120", "25210", "25290", "25300",
-        "25400", "25500", "25610", "25620", "25710", "25720", "25730", "25910",
-        "25920", "25930", "25940", "25990",
-    ],
-    "industrial machinery": [
-        "28110", "28120", "28130", "28140", "28150", "28210", "28220", "28230",
-        "28240", "28250", "28290", "28301", "28302", "28410", "28490", "28910",
-        "28920", "28930", "28940", "28950", "28960", "28990",
-    ],
-    "chemicals": [
-        "20110", "20120", "20130", "20140", "20150", "20160", "20170", "20200",
-        "20301", "20302", "20411", "20412", "20420", "20510", "20520", "20530",
-        "20590", "20600",
-    ],
-    "plastics and rubber": [
-        "22110", "22190", "22210", "22220", "22230", "22290",
-    ],
-    "textiles and apparel": [
-        "13100", "13200", "13300", "13910", "13921", "13922", "13923", "13931",
-        "13939", "13940", "13950", "13960", "13990", "14110", "14120", "14130",
-        "14140", "14190", "14200", "14310", "14390",
-    ],
-    "furniture and timber": [
-        "16100", "16210", "16220", "16230", "16240", "16290", "31010", "31020",
-        "31030", "31090",
-    ],
-    "electronics and electrical": [
-        "26110", "26120", "26200", "26301", "26309", "26400", "26511", "26512",
-        "26513", "26520", "26600", "26701", "26702", "26800", "27110", "27120",
-        "27200", "27310", "27320", "27330", "27400", "27510", "27520", "27900",
-    ],
-    "glass and ceramics": [
-        "23110", "23120", "23130", "23140", "23190", "23200", "23310", "23320",
-        "23410", "23420", "23430", "23440", "23490",
-    ],
-    "transport equipment": [
-        "29100", "29201", "29202", "29203", "29310", "29320", "30110", "30120",
-        "30200", "30300", "30400", "30910", "30920", "30990",
-    ],
-    "wholesale import export": [
-        "46110", "46120", "46130", "46140", "46150", "46160", "46180", "46190",
-        "46410", "46420", "46431", "46439", "46440", "46450", "46460", "46470",
-        "46480", "46491", "46499", "46510", "46520", "46610", "46620", "46630",
-        "46640", "46650", "46660", "46690", "46710", "46720", "46730", "46740",
-        "46750", "46760", "46770", "46900",
-    ],
+try:
+    import ch_cache
+    HAS_CACHE = True
+except ImportError:
+    HAS_CACHE = False
+
+try:
+    import ch_classify
+    HAS_CLASSIFY = True
+except ImportError:
+    HAS_CLASSIFY = False
+
+
+# Companies House has no turnover filter, but the accounts type it publishes is a
+# reliable proxy for size and costs one cheap API call with no document fetch.
+#
+# Every substantial find so far filed full, group or medium accounts. Every dud
+# filed micro, small, abridged or "total exemption full", which despite the name
+# means a small company claiming audit exemption. Screening on this before
+# fetching anything avoids spending OCR time and Anthropic credits on companies
+# that legally do not have to disclose enough to qualify them.
+BIG_ENOUGH = {"full", "group", "medium"}
+TOO_SMALL = {
+    "micro-entity", "small", "dormant", "abridged", "total-exemption-full",
+    "total-exemption-small", "unaudited-abridged", "filing-exemption-subsidiary",
+    "audit-exemption-subsidiary", "initial", "no-accounts-type-available",
 }
 
 
-def _key() -> str:
-    import os
-    return os.environ.get("CH_API_KEY", "")
+def accounts_size(number: str, session=None) -> tuple[str, bool]:
+    """Return (accounts type, is it worth reading). One cheap profile call."""
+    try:
+        get = (session or requests).get
+        import os
+        r = get(f"https://api.company-information.service.gov.uk/company/{number}",
+                auth=(os.environ.get("CH_API_KEY", ""), ""), timeout=20)
+        if r.status_code != 200:
+            return "", True                # cannot tell, so let it through
+        j = r.json()
+        if str(j.get("company_status", "")).lower() not in ("active", ""):
+            return f"status: {j.get('company_status')}", False
+        t = str(((j.get("accounts") or {}).get("last_accounts") or {}).get("type", "")).lower()
+        if not t:
+            return "", True
+        if t in TOO_SMALL:
+            return t, False
+        return t, t in BIG_ENOUGH or True
+    except Exception:
+        return "", True                    # never let the screen kill a run
 
 
-def advanced_search(
-    sic_codes: list[str] | None = None,
-    location: str = "",
-    name_includes: str = "",
-    status: str = "active",
-    incorporated_to: str = "",
-    size: int = 100,
-    start_index: int = 0,
-    session: requests.Session | None = None,
-) -> tuple[list[dict], int]:
-    """One page of Companies House advanced search. Returns (items, total_hits)."""
-    params: dict[str, object] = {"size": min(size, 5000), "start_index": start_index}
-    if sic_codes:
-        params["sic_codes"] = sic_codes
-    if location:
-        params["location"] = location
-    if name_includes:
-        params["company_name_includes"] = name_includes
-    if status:
-        params["company_status"] = status
-    if incorporated_to:
-        params["incorporated_to"] = incorporated_to
+# --------------------------------------------------------------------------
+# FX evidence gate
+#
+# Without this the run keeps every company that survives the size and parent
+# screens, and most of them never mention currency at all. That fills the call
+# sheet with UK-only businesses and spends a Lusha credit on each. A company
+# only earns a place if its own filing shows money crossing a border.
+# --------------------------------------------------------------------------
 
-    get = (session or requests).get
-    r = get(f"{BASE}/advanced-search/companies", params=params,
-            auth=(_key(), ""), timeout=30)
-    if r.status_code != 200:
-        return [], 0
-    j = r.json()
-    out = []
-    for item in j.get("items", []) or []:
-        addr = item.get("registered_office_address", {}) or {}
-        out.append({
-            "name": item.get("company_name", ""),
-            "number": item.get("company_number", ""),
-            "status": item.get("company_status", ""),
-            "incorporated": item.get("date_of_creation", ""),
-            "sic_codes": ", ".join(item.get("sic_codes", []) or []),
-            "locality": addr.get("locality", ""),
-            "postcode": addr.get("postal_code", ""),
-            "region": addr.get("region", ""),
-        })
-    return out, int(j.get("hits", 0) or 0)
+# The FX gate lives in ch_classify so every tool shares one definition.
+try:
+    from ch_classify import fx_evidence
+except ImportError:                       # classifier missing, keep everything
+    def fx_evidence(res: dict) -> str:    # type: ignore[misc]
+        return "no classifier available"
 
 
-def discover(
-    vertical: str = "",
-    sic_codes: list[str] | None = None,
-    location: str = "",
-    max_results: int = 500,
-    min_age_years: int = 8,
-    pause: float = 0.35,
-) -> list[dict]:
-    """Pull candidate companies for a vertical and optional location.
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Discover then triage UK companies")
+    ap.add_argument("--vertical", default="", help=f"one of: {', '.join(sorted(disc.VERTICALS))}")
+    ap.add_argument("--sic", default="", help="comma separated SIC codes, instead of a vertical")
+    ap.add_argument("--location", default="", help="town, city or region. Blank searches nationally")
+    ap.add_argument("--max", type=int, default=300,
+                    help="how many companies that PASS the size screen to find")
+    ap.add_argument("--search-cap", type=int, default=0,
+                    help="stop searching after this many raw candidates (0 = 12x max)")
+    ap.add_argument("--min-age", type=int, default=8, help="skip companies incorporated more recently")
+    ap.add_argument("--out-list", type=Path, default=Path("discovered.csv"))
+    ap.add_argument("--out", type=Path, default=Path("call_sheet_discovered.csv"))
+    ap.add_argument("--discover-only", action="store_true", help="build the list, skip the triage")
+    ap.add_argument("--no-brief", action="store_true", help="skip the paid AI brief")
+    ap.add_argument("--triage-limit", type=int, default=0, help="cap how many get triaged")
+    ap.add_argument("--all-sizes", action="store_true",
+                    help="do not screen out small and micro filers before triage")
+    ap.add_argument("--keep-all", action="store_true",
+                    help="skip the FX screen and keep every company triaged")
+    ap.add_argument("--keep-parents", action="store_true",
+                    help="keep companies with a foreign or operating-group parent in the output")
+    args = ap.parse_args()
 
-    `min_age_years` filters out recently incorporated companies. A business with
-    £5m of currency flowing through it is very rarely three years old, and the
-    trade-list exercise showed how much noise young shell-like companies add.
-    """
-    codes = list(sic_codes or [])
-    if vertical:
-        key = vertical.strip().lower()
-        if key not in VERTICALS:
-            raise ValueError(f"unknown vertical {vertical!r}. "
-                             f"Options: {', '.join(sorted(VERTICALS))}")
-        codes += VERTICALS[key]
-    if not codes:
-        raise ValueError("give either a vertical or explicit sic_codes")
+    sic = [c.strip() for c in args.sic.split(",") if c.strip()]
+    if not sic and not args.vertical:
+        raise SystemExit("give --vertical or --sic")
 
-    cutoff = ""
-    if min_age_years:
-        cutoff = time.strftime("%Y-%m-%d",
-                               time.gmtime(time.time() - min_age_years * 365.25 * 86400))
+    label = args.vertical or f"SIC {','.join(sic)}"
+    where = args.location or "nationally"
+    print(f"searching Companies House: {label}, {where}, "
+          f"active, incorporated before {args.min_age} years ago", flush=True)
 
-    seen: set[str] = set()
-    out: list[dict] = []
-    with requests.Session() as s:
-        start = 0
-        while len(out) < max_results:
-            page, hits = advanced_search(
-                sic_codes=codes, location=location, incorporated_to=cutoff,
-                size=min(100, max_results - len(out)), start_index=start, session=s,
+    # Most UK companies in any sector file small or micro accounts, so searching
+    # for exactly `max` names and then screening leaves almost nothing. Instead
+    # keep pulling pages until enough have passed the screen.
+    want = args.max
+    cap = args.search_cap or want * 12
+    raw = disc.discover(
+        vertical=args.vertical, sic_codes=sic or None, location=args.location,
+        max_results=cap if not args.all_sizes else want, min_age_years=args.min_age,
+    )
+    print(f"found {len(raw)} candidates", flush=True)
+    if not raw:
+        print("nothing returned. Check the location spelling, or widen the SIC codes.")
+        return 0
+    rows = raw
+
+    # Drop anything already processed, so repeat searches only surface new names.
+    if HAS_CACHE:
+        before = len(rows)
+        rows = [r for r in rows
+                if not ch_cache.cache_get(name=r["name"], number=r["number"])]
+        if before - len(rows):
+            print(f"dropping {before - len(rows)} already in the cache", flush=True)
+
+    # Size screen. One profile call each, no documents, no credits.
+    if not args.all_sizes:
+        kept, dropped = [], {}
+        with requests.Session() as sess:
+            for i, r in enumerate(rows, 1):
+                if len(kept) >= want:      # stop screening once we have enough
+                    break
+                if not r.get("number"):
+                    kept.append(r)
+                    continue
+                t, ok = accounts_size(r["number"], sess)
+                if ok:
+                    r["accounts_type_hint"] = t
+                    kept.append(r)
+                else:
+                    dropped[t or "unknown"] = dropped.get(t or "unknown", 0) + 1
+                if i % 50 == 0:
+                    print(f"  screened {i}/{len(rows)}, keeping {len(kept)}/{want}", flush=True)
+                time.sleep(0.12)           # CH allows 600 requests per 5 minutes
+        if dropped:
+            detail = ", ".join(f"{v} {k}" for k, v in sorted(dropped.items(), key=lambda x: -x[1]))
+            print(f"size screen dropped {sum(dropped.values())}: {detail}", flush=True)
+        rows = kept
+        print(f"{len(rows)} companies file accounts worth reading", flush=True)
+        if not rows:
+            print("nothing left after the size screen. Try a different location or vertical.")
+            return 0
+
+    disc.write_run_list(rows, args.out_list)
+    print(f"wrote {args.out_list} with {len(rows)} companies", flush=True)
+
+    if args.discover_only:
+        return 0
+
+    # ---- triage ----
+    import ch_engine as eng
+    todo = rows[: args.triage_limit] if args.triage_limit else rows
+    print(f"\ntriaging {len(todo)}, briefs {'off' if args.no_brief else 'on'}", flush=True)
+
+    results, started = [], time.time()
+    for i, row in enumerate(todo, 1):
+        try:
+            res = eng.process_company(
+                name=row["name"], number=row["number"], do_brief=not args.no_brief,
             )
-            if not page:
-                break
-            for row in page:
-                if row["number"] and row["number"] not in seen:
-                    seen.add(row["number"])
-                    out.append(row)
-            start += len(page)
-            if start >= hits:
-                break
-            time.sleep(pause)          # CH allows 600 requests per 5 minutes
-    return out
+        except KeyboardInterrupt:
+            print("\ninterrupted; completed companies are cached")
+            break
+        except Exception as exc:                  # one bad filing must not kill the run
+            res = eng.blank_result(row["name"], row["number"])
+            res["error"] = f"crashed: {exc}"
+            if HAS_CACHE:
+                ch_cache.cache_put(res)
+        # carry the search fields through, the engine does not know about them
+        for k in ("locality", "postcode", "sic_codes", "incorporated"):
+            res.setdefault(k, "") or res.update({k: res.get(k) or row.get(k, "")})
+        if HAS_CLASSIFY:
+            res.update(ch_classify.classify(res))
+            res["parent_control"] = ch_classify.parent_control(res)
+        results.append(res)
+
+        rate = (time.time() - started) / i
+        note = res.get("priority") or res.get("grade") or (res.get("error", "")[:34] or "done")
+        print(f"[{i}/{len(todo)}] {row['name'][:44]:46} {note:34} "
+              f"eta {(len(todo) - i) * rate / 60:5.1f}m", flush=True)
+
+    # Drop companies where the decision sits with a foreign parent or a separate
+    # operating group. A UK holding company that echoes the subsidiary's name is
+    # kept, since those are structures rather than treasury functions.
+    if HAS_CLASSIFY and not args.keep_parents:
+        before = len(results)
+        blocked = [r for r in results if not ch_classify.winnable(r)]
+        results = [r for r in results if ch_classify.winnable(r)]
+        if blocked:
+            from collections import Counter
+            mix = Counter(r.get("parent_control", "?") for r in blocked)
+            print("\nparent screen dropped " + str(before - len(results)) + ": "
+                  + ", ".join(f"{v} {k}" for k, v in mix.most_common()), flush=True)
+
+    # Keep only companies whose own filing shows currency crossing a border.
+    if not args.keep_all:
+        before = len(results)
+        kept, dropped = [], []
+        for r in results:
+            why = fx_evidence(r)
+            if why:
+                r["fx_evidence"] = why
+                kept.append(r)
+            else:
+                dropped.append(r)
+        results = kept
+        if dropped:
+            print(f"\nFX screen dropped {before - len(results)} of {before}: "
+                  f"no currency evidence in the filing", flush=True)
+            drop_path = args.out.with_name(args.out.stem + "_no_fx.csv")
+            cols = sorted({k for r in dropped for k in r})
+            with drop_path.open("w", encoding="utf-8-sig", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(dropped)
+            print(f"  the discards are in {drop_path} if a rule looks wrong",
+                  flush=True)
+
+    if results:
+        cols: list[str] = []
+        for r in results:
+            for k in r:
+                if k not in cols:
+                    cols.append(k)
+        with args.out.open("w", encoding="utf-8-sig", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(results)
+        print(f"\nwrote {len(results)} rows to {args.out}")
+
+    if HAS_CLASSIFY and results:
+        from collections import Counter
+        print()
+        for pri, n in sorted(Counter(r.get("priority", "") for r in results).items()):
+            print(f"  {n:4}  {pri}")
+    if HAS_CACHE:
+        print("cache now holds:", ch_cache.cache_stats())
+    return 0
 
 
-def write_run_list(rows: list[dict], path: str | Path, include_detail: bool = True) -> Path:
-    """Write a CSV the puller can read. `name` first so the existing loader works."""
-    p = Path(path)
-    cols = ["name", "number", "locality", "postcode", "incorporated", "sic_codes"]
-    with p.open("w", encoding="utf-8-sig", newline="") as fh:
-        w = csv.writer(fh, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
-        if include_detail:
-            w.writerow(cols)
-            for r in rows:
-                w.writerow([r.get(c, "") for c in cols])
-        else:
-            w.writerow(["name"])
-            for r in rows:
-                w.writerow([r.get("name", "")])
-    return p
+if __name__ == "__main__":
+    sys.exit(main())
