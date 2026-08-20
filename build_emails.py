@@ -440,12 +440,21 @@ def check_subject(subject: str, company: str) -> list[str]:
     out = []
     if "?" in subject:
         out.append("question mark in subject")
-    if len(subject.split()) >= 9:
+    if len(subject.split()) > 11:
         out.append("subject too long")
     if re.search(r"\b(fx|foreign exchange|currency risk|hedging|lumon)\b", subject, re.I):
         out.append("banned word in subject")
-    words = [w for w in re.sub(r"[^a-z ]", " ", company.lower()).split() if len(w) > 4]
-    if any(w in subject.lower() for w in words):
+    # Only flag when the subject is actually addressing them by name, not when
+    # it happens to reuse a word: "Timber priced in dollars" is fine for North
+    # West Timber Treatments, "Revive! UK turnover up 20%" is not.
+    words = [w for w in re.sub(r"[^a-z ]", " ", company.lower()).split()
+             if len(w) > 4 and w not in
+             ("group", "limited", "services", "solutions", "international",
+              "holdings", "trading", "supplies", "systems", "products")]
+    low = subject.lower()
+    lead = low.split()[0] if low.split() else ""
+    hits = sum(1 for w in words if w in low)
+    if hits >= 2 or (words and lead == words[0]):
         out.append("company name in subject")
     return out
 
@@ -606,7 +615,7 @@ def main() -> int:
     wanted = None if args.priority.upper() == "ALL" else tuple(
         p.strip() for p in args.priority.split(",") if p.strip())
 
-    rows, skipped, failed, blocked_owner = [], 0, 0, 0
+    rows, skipped, failed, blocked_owner, no_fx = [], 0, 0, 0, 0
     for i, c in enumerate(contacts, 1):
         acct = lookup(c["company"], c.get("number", ""))
         if not acct:
@@ -621,6 +630,12 @@ def main() -> int:
         # no point writing to them however good the accounts look.
         if HAS_CLASSIFY and not ch_classify.winnable(acct):
             blocked_owner += 1
+            continue
+        # No currency evidence in the filing means there is nothing to write
+        # about, and writing anyway produces an email that argues with the
+        # accounts. Cheaper to skip than to generate and bin.
+        if HAS_CLASSIFY and not ch_classify.fx_evidence(acct):
+            no_fx += 1
             continue
 
         brief = brief_for(acct)
@@ -696,6 +711,7 @@ def main() -> int:
     print(f"\n{len(rows)} emails written to {args.out}")
     print(f"  skipped (no accounts data or wrong priority): {skipped}")
     print(f"  skipped (listed, too large, or parent controls FX): {blocked_owner}")
+    print(f"  skipped (no currency evidence in the filing): {no_fx}")
     print(f"  failed (model error): {failed}")
     flagged = [r for r in rows if r["check"] != "ok"]
     if flagged:
