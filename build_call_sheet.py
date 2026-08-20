@@ -219,6 +219,18 @@ def currency_line(rec: dict) -> str:
 
     hedge = str(rec.get("hedging_instruments", "")).strip()
     hl = hedge.lower()
+
+    # "Forward currency contracts held. At year end had contracts of £nil"
+    # opens by saying held and then says the amount is nothing. Reading only
+    # the first clause produced HOLDS against a company with no cover at all,
+    # which is the opposite of the truth and the wrong pitch on the call.
+    nil = re.search(r"(of|totalling|amounting to|value of)\s*[£$\u20ac]?\s*"
+                    r"(nil|nought|zero|0)\b", hedge, re.I) or \
+          re.search(r"[£$\u20ac]\s?nil", hedge, re.I)
+    if nil:
+        bits.append("POLICY ONLY: stated hedging policy but £nil held at year end")
+        hedge = ""
+        hl = ""
     # "none evident - accounts state the company does not hedge" starts with
     # none evident, so test the opening rather than the whole string
     denies = hl.startswith(("none", "not disclosed")) or "no hedging" in hl
@@ -275,28 +287,84 @@ def currency_line(rec: dict) -> str:
 # filing, not no exposure.
 # --------------------------------------------------------------------------
 
-# Sectors where imported goods are close to certain, whatever the accounts say.
+# Sectors where the goods are near-certainly imported. Deliberately narrow.
+# The earlier version matched on "food" and turnover, which flagged Tims Dairy
+# (a UK yogurt maker buying British milk) and Unitas Wholesale (a buying group
+# whose turnover is membership fees, not goods). Neither buys a thing abroad.
 _IMPORTS_LIKELY = re.compile(
-    r"wholesal|distribut|import|merchant|stockist|stockhold|"
-    r"manufactur|engineer|fabricat|foundry|castings|precision|machining|"
-    r"packaging|plastics|extrud|steel|alloy|metal|timber|glass|"
-    r"electrical|electronic|component|parts|equipment|machinery|"
-    r"food|produce|seafood|fish|meat|wine|drink|confectioner|bakery|"
-    r"chemical|pharma|textile|apparel|furniture|toy|giftware",
+    r"import\w*|"
+    r"wholesal\w*|distribut\w*|merchant|stockist|stockhold\w*|factor\b|"
+    r"\b(steel|alloy|metal|aluminium|copper|timber|plywood|glass|resin|polymer|"
+    r"plastic|chemical|pigment|solvent|component|bearing|fastener|semiconductor)\b|"
+    r"\b(electronic|electrical) (component|equipment|distribut)|"
+    r"seafood|fish merchant|fresh produce|fruit and veg|"
+    r"wine|spirit|champagne|coffee|tea|cocoa|spice|"
+    r"machinery (import|distribut|suppl)|"
+    r"clothing|apparel|textile|footwear|giftware|toy\b|houseware|"
+    # a machine shop buys steel, tooling and components, most of it priced
+    # abroad even when the invoice arrives in sterling
+    r"manufactur\w*|engineer\w*|fabricat\w*|machining|precision|foundry|"
+    r"casting|pressing|moulding|extrusion|tooling|sub-?assembl\w+|"
+    r"packaging|printing|coating|plating|treatment",
     re.I,
 )
-# Businesses that genuinely tend to be domestic end to end.
-_DOMESTIC = re.compile(
-    r"\b(recruitment|estate agen|letting|solicitor|accountan|insurance broker|"
-    r"care home|nursery|dental|veterinary|hairdress|salon|gym|leisure centre|"
-    r"pub|restaurant|takeaway|cleaning services|security guard|scaffold|"
-    r"groundwork|civil engineering contractor|housebuild|property develop)\b",
+
+# Business models that do not buy goods at all, whatever sector words appear
+# in the description. A buying group's turnover is membership income; a
+# franchise network's is fees. Neither pays a supplier in euros.
+_NOT_A_BUYER = re.compile(
+    r"buying group|cooperative|co-operative|membership services|"
+    r"supplier contributions|franchis\w+|"
+    r"recruitment|consultanc\w+|advisor\w+|agency|agenc\w+|"
+    r"software|saas|platform|marketplace|app\b|"
+    r"insurance|broker(age)? services|financial services|fund manage|"
+    r"holding company|investment (company|vehicle)|"
+    r"training|education|care home|nursery|dental|veterinary|"
+    r"haulage|logistics|freight forward|storage and warehous|"
+    r"construction|housebuild|groundwork|civil engineering|scaffold|"
+    r"estate agen|letting|property (develop|manage|investment)|"
+    r"cleaning|security guard|facilities management|"
+    r"pub\b|restaurant|takeaway|catering services|hospitality",
+    re.I,
+)
+
+# Manufacturers whose raw material is domestic. A dairy buys British milk, a
+# bakery buys British flour. Being large and in food proves nothing.
+_DOMESTIC_INPUT = re.compile(
+    r"dairy|yogurt|yoghurt|creamery|milk|"
+    r"bakery|baker\b|bread|"
+    r"abattoir|slaughter|butcher|meat process|poultry process|"
+    r"brewery|brewer\b|cider|"
+    r"quarry|aggregate|concrete|ready-?mix|"
+    r"farm\w*|agricultur\w*|grower",
+    re.I,
+)
+
+
+# One shared definition of currency evidence, from ch_classify. This used to be
+# a second implementation here and the two disagreed: a company could pass the
+# discovery gate and then be cut from the call sheet, or the reverse.
+if HAS_CLASSIFY:
+    has_hard_evidence = ch_classify.fx_evidence
+else:
+    def has_hard_evidence(rec: dict) -> str:      # type: ignore[misc]
+        return ""
+
+
+_MAKES_THINGS = re.compile(
+    r"manufactur\w*|fabricat\w*|foundry|casting|pressing|machining|"
+    r"engineer\w*|precision|tooling|moulding|extrusion",
     re.I,
 )
 
 
 def worth_calling(rec: dict, priority: str) -> tuple[int, str]:
-    """Rank and reason, independent of what the accounts disclose."""
+    """Rank, or 0 meaning do not call and do not spend a Lusha credit.
+
+    The point of the tool is to remove the guesswork, so a company only earns
+    a place if the accounts show currency crossing a border or the business
+    model makes it near-certain. Everything else is cut, not demoted.
+    """
     p = str(priority)[:2]
     turnover = str(rec.get("turnover", "")).replace(",", "")
     try:
@@ -304,29 +372,33 @@ def worth_calling(rec: dict, priority: str) -> tuple[int, str]:
     except ValueError:
         t = 0.0
 
-    if p in ("P1", "P2"):
-        return 1, "evidence of exposure, no cover"
-    if p == "P3":
-        return 3, "already hedges, second-call lead"
-
     what = " ".join(str(rec.get(k, "")) for k in
-                    ("one_liner", "call_ammo", "sic_codes"))
+                    ("one_liner", "call_ammo", "sic_codes", "excerpts"))
 
-    if _DOMESTIC.search(what) and not _IMPORTS_LIKELY.search(what):
-        return 5, "looks domestic end to end"
+    # Evidence in the accounts beats any sector reasoning.
+    if p in ("P1", "P2"):
+        return 1, "accounts show exposure, nothing held against it"
+    if p == "P3":
+        return 2, "holds instruments, so the exposure is real"
 
-    if _IMPORTS_LIKELY.search(what):
-        if t >= 1e7:
-            return 2, "no disclosure, but sector and size say they buy abroad"
-        if t >= 3e6:
-            return 3, "no disclosure, sector suggests imported goods"
-        return 4, "sector fits but small"
+    # A thin filing that still discloses currency beats any sector reasoning.
+    evidence = has_hard_evidence(rec)
+    if evidence:
+        return 2, evidence
 
-    if t >= 2e7:
-        return 3, "large enough to be worth a qualifying call"
-    if t >= 5e6:
-        return 4, "worth a qualifying call"
-    return 5, "no evidence and nothing to suggest otherwise"
+    # No evidence. It has to be near-certain from the business model.
+    # A manufacturer buys raw material, so it is never a "does not buy goods"
+    # case however many service words appear in the description.
+    if _NOT_A_BUYER.search(what) and not _MAKES_THINGS.search(what):
+        return 0, "does not buy goods, no exposure to have"
+    if _DOMESTIC_INPUT.search(what) and not re.search(r"import", what, re.I):
+        return 0, "domestic raw material"
+    if not _IMPORTS_LIKELY.search(what):
+        return 0, "nothing in the accounts or the business model suggests FX"
+    if t < 5e6:
+        return 0, "sector fits but too small to be worth the credit"
+
+    return 3, "no disclosure, but this sector buys abroad"
 
 
 def main() -> None:
@@ -354,7 +426,7 @@ def main() -> None:
         contacts = list(csv.DictReader(fh))
     print(f"{len(contacts)} contacts", flush=True)
 
-    rows, matched = [], 0
+    rows, matched, cut = [], 0, []
     for c in contacts:
         company = c.get("company", "")
         rec = idx.get(squash(company))
@@ -372,6 +444,9 @@ def main() -> None:
         matched += 1
         pri = ch_classify.priority(rec) if HAS_CLASSIFY else rec.get("priority", "")
         rank, why = worth_calling(rec, pri)
+        if rank == 0:
+            cut.append((company, why))
+            continue
         t = str(rec.get("turnover", "")).replace(",", "")
         rows.append({
             "name": c.get("name", ""),
@@ -391,6 +466,11 @@ def main() -> None:
         })
 
     print(f"{matched}/{len(contacts)} matched to accounts", flush=True)
+    if cut:
+        print(f"{len(cut)} cut as not worth a call or a Lusha credit:", flush=True)
+        from collections import Counter
+        for reason, n in Counter(w for _, w in cut).most_common():
+            print(f"    {n:4}  {reason}", flush=True)
 
     # sort by whether it is worth ringing, then by size
     rows.sort(key=lambda r: (r["call_rank"], -r["_t"]))
@@ -413,6 +493,15 @@ def main() -> None:
     # the merge macro dies with runtime error 5631
     raw = out.read_bytes().rstrip(b"\r\n")
     out.write_bytes(raw)
+
+    if cut:
+        # keep the discards visible: a wrong rule should be easy to spot
+        cutfile = out.with_name(out.stem + "_cut.csv")
+        with cutfile.open("w", encoding="utf-8-sig", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["company", "why_cut"])
+            w.writerows(cut)
+        print(f"cut list written to {cutfile}")
 
     print(f"written to {out}")
 
