@@ -75,6 +75,46 @@ def build_index(records: list[dict]) -> dict[str, dict]:
 # formatting
 # --------------------------------------------------------------------------
 
+def filed_in_thousands(rec: dict) -> bool:
+    """Is this filing denominated in £000s?
+
+    Larger companies file in thousands, so a turnover of 195,000 means £195m
+    and an exchange gain of 98 means £98,000. Reading them raw made Diageo
+    Northern Ireland look like a £0.2m business and hid a £195m one, and the
+    same error buried around a hundred companies in the last two nightly runs.
+
+    Two signals, either is enough:
+      the accounts text says the figures are in thousands
+      the turnover is suspiciously small for a company filing full accounts
+    """
+    blob = " ".join(str(rec.get(k, "")) for k in
+                    ("call_ammo", "excerpts", "one_liner", "findings"))
+    if re.search(r"(£|\bGBP\b)\s?'?000s?\b|in thousands|'000\)|\bk\b\s?GBP|"
+                 r"amounts? (are |presented |stated )?in thousands|"
+                 r"rounded to the nearest thousand", blob, re.I):
+        return True
+
+    t = str(rec.get("turnover", "")).replace(",", "").strip()
+    try:
+        n = float(t)
+    except ValueError:
+        return False
+    cat = str(rec.get("accounts_category", "")).lower()
+    # a company big enough to file full, medium or group accounts does not turn
+    # over £200k, so the figure is almost certainly already in thousands
+    return 0 < n < 500_000 and cat in ("full", "medium", "group")
+
+
+def scale(v, thousands: bool):
+    """Turn a raw figure into pounds, applying the filing scale."""
+    t = str(v).replace(",", "").strip()
+    try:
+        n = float(t)
+    except ValueError:
+        return None
+    return n * 1000 if thousands else n
+
+
 def money(v) -> str:
     v = str(v).replace(",", "").strip()
     if not v:
@@ -123,7 +163,9 @@ def money_line(rec: dict) -> str:
     ammo = str(rec.get("call_ammo", ""))
     bits = []
 
-    t = money(rec.get("turnover", ""))
+    k = filed_in_thousands(rec)
+    raw = scale(rec.get("turnover", ""), k)
+    t = money(raw) if raw is not None else money(rec.get("turnover", ""))
     # the direction sentence can start with Turnover, Revenue, Sales, or the
     # verb first ("Revenue up 47.9% to..."), so try the whole clause
     blob = ammo + " " + str(rec.get("triggers", ""))
@@ -213,7 +255,9 @@ def currency_line(rec: dict) -> str:
     if pnl and pnl.lower() != "not disclosed":
         pairs = re.findall(r"(FY\d+)\s+(gain|loss|credit)\s+([\d,]+)", pnl, re.I)
         if pairs:
-            bits.append(", ".join(f"{y} {k.lower()} {money(v)}" for y, k, v in pairs[:2]))
+            thou = filed_in_thousands(rec)
+            bits.append(", ".join(
+                f"{y} {kind.lower()} {money(scale(v, thou))}" for y, kind, v in pairs[:2]))
         else:
             bits.append(clip(pnl, 80))
 
@@ -445,8 +489,12 @@ def main() -> None:
         pri = ch_classify.priority(rec) if HAS_CLASSIFY else rec.get("priority", "")
         rank, why = worth_calling(rec, pri)
         if rank == 0:
+            # Keep it in the sheet at the bottom rather than dropping it. The
+            # rules get this wrong often enough that a silent cut is worse than
+            # a low rank: Fruugo trades in 41 countries and was cut as "does
+            # not buy goods" because it is a marketplace.
             cut.append((company, why))
-            continue
+            rank, why = 4, "probably not, but here to judge: " + why
         t = str(rec.get("turnover", "")).replace(",", "")
         rows.append({
             "name": c.get("name", ""),
