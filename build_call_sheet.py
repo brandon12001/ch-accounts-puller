@@ -92,7 +92,9 @@ def filed_in_thousands(rec: dict) -> bool:
     if re.search(r"(£|\bGBP\b)\s?'?000s?\b|in thousands|'000\)|\bk\b\s?GBP|"
                  r"amounts? (are |presented |stated )?in thousands|"
                  r"rounded to the nearest thousand", blob, re.I):
-        return True
+        # the note says thousands, but only believe it if the stored figure is
+        # small enough to actually be in thousands
+        return _scale_needed(rec)
 
     t = str(rec.get("turnover", "")).replace(",", "").strip()
     try:
@@ -100,9 +102,23 @@ def filed_in_thousands(rec: dict) -> bool:
     except ValueError:
         return False
     cat = str(rec.get("accounts_category", "")).lower()
-    # a company big enough to file full, medium or group accounts does not turn
-    # over £200k, so the figure is almost certainly already in thousands
+    # A company big enough to file full, medium or group accounts does not turn
+    # over £200k, so a small figure is almost certainly already in thousands.
+    # The text test above is not enough on its own: an accounts note saying
+    # "amounts are rounded to the nearest thousand" fires on filings whose
+    # turnover field was already converted, which turned Chemring into a £78bn
+    # business. Only scale when the raw number is small enough to need it.
     return 0 < n < 500_000 and cat in ("full", "medium", "group")
+
+
+def _scale_needed(rec: dict) -> bool:
+    """Guard: never scale a figure that is already a plausible turnover."""
+    t = str(rec.get("turnover", "")).replace(",", "").strip()
+    try:
+        n = float(t)
+    except ValueError:
+        return False
+    return 0 < n < 500_000
 
 
 def scale(v, thousands: bool):
