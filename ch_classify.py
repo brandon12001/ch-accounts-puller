@@ -419,7 +419,16 @@ def fx_evidence(res: dict) -> str:
     cur = str(res.get("currencies_named", "")).strip()
     if cur and cur.lower() != "not disclosed" and not _XBRL_NOISE.search(cur) \
        and _CCY.search(cur):
-        return "foreign currencies named"
+        # "GBP, USD, EUR" with nothing else is the XBRL tag list, not a
+        # statement that the company trades in those currencies. It appears
+        # 626 times in the cache, and the caveat usually sits in call_ammo
+        # rather than in this field, so check there before believing it.
+        bare = re.fullmatch(r"(GBP|USD|EUR)(\s*[,;/]\s*(GBP|USD|EUR)){0,2}",
+                            cur, re.I)
+        if bare and _XBRL_NOISE.search(str(res.get("call_ammo", ""))):
+            pass                      # metadata only, keep looking
+        else:
+            return "foreign currencies named"
 
     exp = str(res.get("export_split", "")).strip()
     if exp and exp.lower() != "not disclosed" and re.search(r"\d", exp) \
