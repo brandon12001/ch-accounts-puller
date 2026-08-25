@@ -17,6 +17,7 @@ far the filing can be trusted. Then rank on winnability rather than on wordiness
 
 from __future__ import annotations
 
+import os
 import re
 
 # Only currency-specific denials count. Sales geography does not: an importer
@@ -383,8 +384,21 @@ _UK_ONLY = re.compile(
 )
 
 
+# Strict mode drops the inferred routes and keeps only the four that quote
+# something explicit from the filing. Set FX_STRICT=0 in the environment to go
+# back to the wider gate.
+FX_STRICT = os.environ.get("FX_STRICT", "1") != "0"
+
+
 def fx_evidence(res: dict) -> str:
-    """Why this company looks like it touches foreign currency, or ''."""
+    """Why this company looks like it touches foreign currency, or ''.
+
+    Strict mode keeps only what the accounts state outright: a figure in the
+    P&L, instruments actually held, a named foreign currency, or an export
+    split with numbers. The softer routes, currency words appearing near trade
+    words and importer/exporter in the description, are inference rather than
+    disclosure and are switched off.
+    """
     # a figure in the P&L is the strongest signal there is
     pnl = str(res.get("fx_pnl_figures", "")).strip()
     if pnl and pnl.lower() != "not disclosed":
@@ -411,6 +425,9 @@ def fx_evidence(res: dict) -> str:
     if exp and exp.lower() != "not disclosed" and re.search(r"\d", exp) \
        and not _UK_ONLY.search(exp):
         return "export split disclosed"
+
+    if FX_STRICT:
+        return ""
 
     est = str(res.get("est_fx_volume", "")).strip()
     if est.upper().startswith("EST"):
@@ -462,7 +479,15 @@ def priority(row) -> str:
             return "X - no evidence"
         return "P4 - thin filing, qualify by phone"
 
-    ev, pos, conf, t = fx_evidence(row), fx_position(row), confidence(row), _turnover(row)
+    # NOTE: fx_evidence is the gate and returns a reason string, not a
+    # category. The old category function was _fx_category. Mixing them made
+    # every comparison below silently false, which is how J. Barbour & Sons
+    # ended up at X while passing the gate.
+    ev = _fx_category(row) if "_fx_category" in globals() else (
+        "quantified" if has_quantified_fx(row)
+        else "stated" if fx_evidence(row)
+        else "none")
+    pos, conf, t = fx_position(row), confidence(row), _turnover(row)
 
     if ev == "denied":
         return "X - accounts say no exposure"
@@ -490,6 +515,16 @@ def priority(row) -> str:
             return "P3 - established hedger"
         if big or real:
             return "P3 - established hedger"
+    # The gate and the priority must not contradict each other. J. Barbour &
+    # Sons discloses a currency hedging strategy in operation and an estimated
+    # £15-25m exposure, passes fx_evidence, and still fell through to X because
+    # no single confidence test caught it. If the filing carries currency
+    # evidence, the floor is P4, never X.
+    if fx_evidence(row):
+        if holds_instruments(row) or "hedger" in str(row.get("sophistication", "")).lower():
+            return "P3 - established hedger"
+        return "P4 - thin filing, qualify by phone"
+
     if conf in ("low", "none"):
         return "P4 - thin filing, qualify by phone"
     if ev in ("stated", "implied"):
