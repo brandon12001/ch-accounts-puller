@@ -375,7 +375,7 @@ _IMPORTS_LIKELY = re.compile(
 _NOT_A_BUYER = re.compile(
     r"buying group|cooperative|co-operative|membership services|"
     r"supplier contributions|franchis\w+|"
-    r"recruitment|consultanc\w+|advisor\w+|agency|agenc\w+|"
+    r"consultanc\w+|advisor\w+|agency|agenc\w+|"
     r"software|saas|platform|marketplace|app\b|"
     r"insurance|broker(age)? services|financial services|fund manage|"
     r"holding company|investment (company|vehicle)|"
@@ -409,6 +409,21 @@ if HAS_CLASSIFY:
 else:
     def has_hard_evidence(rec: dict) -> str:      # type: ignore[misc]
         return ""
+
+
+# International staffing is a strong FX case, not a weak one. The agency
+# invoices the client in the local currency and pays the contractor in
+# another, every payroll cycle, both sides, continuously. That is a better
+# hedging case than a manufacturer who imports twice a year. Treating
+# "recruitment" as a no-goods-trade exclusion cut them all.
+_PLACES_ABROAD = re.compile(
+    r"(recruit\w*|staffing|placement|contractor|talent|executive search)"
+    r"[^.]{0,80}(internationa\w*|globa\w*|overseas|abroad|worldwide|"
+    r"europe|emea|apac|americas|cross-?border)|"
+    r"(internationa\w*|globa\w*|overseas|cross-?border)[^.]{0,60}"
+    r"(recruit\w*|staffing|placement|contractor|talent)",
+    re.I,
+)
 
 
 _MAKES_THINGS = re.compile(
@@ -449,6 +464,9 @@ def worth_calling(rec: dict, priority: str) -> tuple[int, str]:
     # No evidence. It has to be near-certain from the business model.
     # A manufacturer buys raw material, so it is never a "does not buy goods"
     # case however many service words appear in the description.
+    if _PLACES_ABROAD.search(what):
+        return 3, "international staffing, pays contractors in local currency"
+
     if _NOT_A_BUYER.search(what) and not _MAKES_THINGS.search(what):
         return 0, "does not buy goods, no exposure to have"
     if _DOMESTIC_INPUT.search(what) and not re.search(r"import", what, re.I):
