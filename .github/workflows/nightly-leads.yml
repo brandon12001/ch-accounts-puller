@@ -18,9 +18,11 @@ name: Nightly lead run
 #   earlier run is skipped before any money is spent reading its accounts.
 #
 #   Companies House allows 600 requests per five minutes per key. Each job makes
-#   roughly five a minute, so twelve jobs sit near 300 per five minutes. Inside
-#   the limit with headroom, but this is the ceiling. Do not add verticals
-#   without spacing the runs or using a second key.
+#   roughly five a minute, so fourteen running at once sit near 350 per five
+#   minutes. There are twenty verticals in the matrix but max-parallel caps
+#   concurrency at fourteen, so the last six queue and start as others finish.
+#   That keeps the API inside its limit and spreads the load across the night.
+#   Do not raise max-parallel without a second CH key.
 
 on:
   schedule:
@@ -51,7 +53,7 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
-      max-parallel: 12
+      max-parallel: 14
       matrix:
         vertical:
           - "food wholesale"
@@ -66,6 +68,20 @@ jobs:
           - "textiles and apparel"
           - "transport equipment"
           - "glass and ceramics"
+          # added 25/08: the original twelve have each had a pass and the
+          # qualification rate has fallen from 12% to 7%. These are untouched
+          # and chosen for direct import or export rather than UK middlemen.
+          - "seafood and fish"
+          - "pharma and medical"
+          - "automotive parts"
+          - "building products"
+          - "agriculture and horticulture"
+          - "paper and print"
+          - "energy and environmental"
+          - "marine and offshore"
+          # international staffing pays contractors in one currency and bills
+          # clients in another, continuously, on both sides
+          - "recruitment and staffing"
 
     steps:
       - uses: actions/checkout@v4
