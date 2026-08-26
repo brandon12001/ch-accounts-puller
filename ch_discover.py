@@ -90,6 +90,79 @@ VERTICALS: dict[str, list[str]] = {
         "46640", "46650", "46660", "46690", "46710", "46720", "46730", "46740",
         "46750", "46760", "46770", "46900",
     ],
+    # ---- added 25/08/2026 -------------------------------------------------
+    # The original twelve have each had a full pass and the qualification rate
+    # has fallen from 12% to 7%, which is what a worked-out vertical looks like.
+    # These eight are untouched and chosen because the goods are imported or
+    # exported directly rather than through a UK middleman, which is what the
+    # FX gate needs in order to find anything.
+    "seafood and fish": [
+        "03110", "03120", "03210", "03220",   # fishing and aquaculture
+        "10200",                              # processing fish, crustaceans
+        "46380",                              # wholesale of fish
+    ],
+    "pharma and medical": [
+        "21100", "21200",                     # pharmaceutical manufacture
+        "32500",                              # medical and dental instruments
+        "26600",                              # irradiation and electromedical
+        "46460",                              # wholesale of pharmaceutical goods
+        "72110",                              # biotech research
+    ],
+    "automotive parts": [
+        "29310", "29320",                     # parts and accessories
+        "45310", "45320",                     # wholesale and retail of parts
+        "22190",                              # rubber products, tyres
+        "28150",                              # bearings, gears, drive elements
+    ],
+    "building products": [
+        "23610", "23620", "23630", "23640", "23650", "23690",  # concrete, cement
+        "16230",                              # builders carpentry and joinery
+        "25110", "25120",                     # metal structures, doors, windows
+        "46730",                              # wholesale of wood and materials
+        "43320", "43330",                     # joinery and floor installation
+    ],
+    "agriculture and horticulture": [
+        "01110", "01130", "01190", "01250",   # growing crops
+        "01610", "01620",                     # support activities
+        "20150", "20200",                     # fertiliser, agrochemicals
+        "46210", "46220",                     # wholesale of grain, flowers
+        "28300",                              # agricultural machinery
+    ],
+    "paper and print": [
+        "17110", "17120", "17211", "17219",   # pulp, paper, corrugated
+        "17220", "17230", "17240", "17290",
+        "18110", "18121", "18129", "18130",   # printing
+        "46760",                              # wholesale of other intermediate
+    ],
+    "energy and environmental": [
+        "27110", "27120", "27200",            # motors, generators, batteries
+        "28110",                              # engines and turbines
+        "35110", "35140",                     # electricity generation and trade
+        "38210", "38320",                     # waste treatment, recovery
+        "42220",                              # utility projects
+    ],
+    # Added 26/08. International staffing invoices clients in one currency and
+    # pays contractors in another, every payroll cycle, on both sides. That is
+    # a continuous two-sided flow rather than an occasional import, and these
+    # are among Lumon's best existing clients. No recruitment SIC code was in
+    # any vertical, so discovery had never looked for them.
+    "recruitment and staffing": [
+        "78100",          # activities of employment placement agencies
+        "78101",          # motion picture, TV and other theatrical casting
+        "78109",          # other activities of employment placement agencies
+        "78200",          # temporary employment agency activities
+        "78300",          # human resources provision and management
+        "70229",          # management consultancy, catches search firms
+        "82911",          # activities of collection agencies
+    ],
+    "marine and offshore": [
+        "30110", "30120",                     # shipbuilding, pleasure craft
+        "33150",                              # repair of ships and boats
+        "50100", "50200",                     # sea and coastal transport
+        "52220",                              # service activities for water transport
+        "09100",                              # support for petroleum extraction
+    ],
+
 }
 
 
