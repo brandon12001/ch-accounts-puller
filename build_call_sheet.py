@@ -309,7 +309,17 @@ def currency_line(rec: dict) -> str:
         found = {"EUR" if c in ("EUR", "EUR") else "USD" if c in ("USD", "DOL") else c
                  for c in found}
         if found:
-            bits.append("trades in " + "/".join(sorted(found)))
+            ccy = "/".join(sorted(found))
+            # A currency named alongside a figure, instruments or an export
+            # split is operational. A currency named on its own is almost
+            # always the XBRL tag list, which proves nothing about what the
+            # company actually does. Say so rather than "trades in".
+            hard_already = any(k in " ".join(bits) for k in
+                               ("gain", "loss", "credit", "HOLDS", "NO COVER", "split"))
+            if hard_already:
+                bits.append("trades in " + ccy)
+            else:
+                bits.append(f"{ccy} named in the filing, operational use not established")
 
     exp = str(rec.get("export_split", "")).strip()
     if exp and exp.lower() != "not disclosed" and re.search(r"\d", exp):
@@ -433,6 +443,47 @@ _MAKES_THINGS = re.compile(
 )
 
 
+
+_XBRL_ONLY = re.compile(r"named in the filing, operational use not established"
+                        r"|taxonomy|metadata|schema|xbrl", re.I)
+
+
+def _figures_look_wrong(rec: dict) -> bool:
+    """A crude plausibility check on the extracted numbers.
+
+    B & Y Engineering came out at £74.5m turnover with £28k gross profit and
+    £45k admin costs, which cannot all be right. When turnover dwarfs both
+    gross profit and admin by more than 100x, the turnover figure is not
+    trustworthy and should not be quoted on a call.
+    """
+    def num(k):
+        try:
+            return float(str(rec.get(k, "")).replace(",", "").strip())
+        except (ValueError, TypeError):
+            return None
+    t = num("turnover"); gp = num("gross_profit"); admin = num("admin_expenses")
+    if t and t > 5_000_000:
+        small = [x for x in (gp, admin) if x is not None and x > 0]
+        if small and max(small) * 100 < t:
+            return True
+    return False
+
+
+def _tier1_or_2(rec: dict) -> bool:
+    """Hard evidence: a figure, instruments held, an export split, or a
+    currency named with something operational beside it. A bare currency tag
+    on its own is tier 4 and does not count."""
+    if str(rec.get("fx_pnl_figures", "")).strip().lower() not in ("", "not disclosed"):
+        return True
+    h = str(rec.get("hedging_instruments", "")).strip().lower()
+    if h and not h.startswith(("none", "not disclosed", "no hedging")):
+        return True
+    exp = str(rec.get("export_split", "")).strip().lower()
+    if exp and exp != "not disclosed" and re.search(r"\d[\d,]{3,}", exp):
+        return True
+    return False
+
+
 def worth_calling(rec: dict, priority: str) -> tuple[int, str]:
     """Rank, or 0 meaning do not call and do not spend a Lusha credit.
 
@@ -456,9 +507,12 @@ def worth_calling(rec: dict, priority: str) -> tuple[int, str]:
     if p == "P3":
         return 2, "holds instruments, so the exposure is real"
 
-    # A thin filing that still discloses currency beats any sector reasoning.
+    # A thin filing that still discloses currency beats any sector reasoning,
+    # but only when that evidence is more than a bare XBRL currency tag. A tag
+    # on its own is tier 4 and proves nothing operational, so it must not lift
+    # a company to P4.
     evidence = has_hard_evidence(rec)
-    if evidence:
+    if evidence and (_tier1_or_2(rec) or not _XBRL_ONLY.search(evidence)):
         return 2, evidence
 
     # No evidence. It has to be near-certain from the business model.
@@ -540,13 +594,26 @@ def main() -> None:
             "call_rank": rank,
             "why_call": why,
             "business": clip(rec.get("one_liner", ""), 120),
-            "money": money_line(rec),
+            "money": (money_line(rec) + "  [VERIFY: figures look inconsistent]"
+                       if _figures_look_wrong(rec) else money_line(rec)),
             "happening": happening_line(rec),
             "currency": currency_line(rec),
             "risk": risk_line(rec),
             "_t": float(t) if t.replace(".", "").isdigit() else 0,
         })
 
+    # Label each cut so the reason is honest: proven-no-FX is a conclusion about
+    # the company, cut-from-list is only a conclusion about today's call time.
+    def _cut_kind(company):
+        rec = idx.get(squash(company))
+        blob = " ".join(str((rec or {}).get(k, "")) for k in
+                        ("call_ammo", "one_liner", "findings")).lower()
+        if re.search(r"no (fx|foreign exchange|currency) (exposure|transactions?|activity)"
+                     r"|all (turnover|sales)[^.]{0,40}united kingdom"
+                     r"|only conducted in sterling|does not (hedge|trade overseas)", blob):
+            return "PROVEN NO FX in the accounts"
+        return "cut from call list, no FX evidence on hand (may still import)"
+    cut = [(co, _cut_kind(co)) for co, _ in cut]
     print(f"{matched}/{len(contacts)} matched to accounts", flush=True)
     if cut:
         print(f"{len(cut)} cut as not worth a call or a Lusha credit:", flush=True)
