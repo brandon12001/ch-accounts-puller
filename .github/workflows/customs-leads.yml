@@ -1,0 +1,126 @@
+name: Customs leads
+
+# Run a UK Trade Info export through the customs triage.
+# You upload the export once to the repo (or paste a URL), pick it here, and
+# the workflow ranks every company, enriches new names through Companies House,
+# and commits a call sheet plus a Lusha lookup list.
+
+on:
+  workflow_dispatch:
+    inputs:
+      customs_file:
+        description: "Path to the UK Trade Info CSV in the repo (e.g. customs/cassava.csv)"
+        required: true
+        default: "customs/latest.csv"
+      triage_new:
+        description: "Triage companies not already in the cache? (slower, uses API credits)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  customs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Pull the customs file name
+        id: f
+        run: echo "csv=${{ github.event.inputs.customs_file }}" >> "$GITHUB_OUTPUT"
+
+      # Step 1: find companies in the export that are not yet in the cache,
+      # and (optionally) triage just those through Companies House. This is the
+      # only step that spends API credits, and only on genuinely new names.
+      - name: Triage new companies
+        if: ${{ github.event.inputs.triage_new == 'true' }}
+        env:
+          CH_API_KEY: ${{ secrets.CH_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python - <<'PY'
+          import csv, json, re, unicodedata, pathlib, sys
+          f = pathlib.Path("${{ steps.f.outputs.csv }}")
+          # unique company names from the customs export
+          seen=set(); names=[]
+          with f.open(encoding="utf-8-sig", newline="") as fh:
+              r=csv.DictReader(fh)
+              col={c.lower().strip():c for c in (r.fieldnames or [])}
+              nc=col.get("companyname") or col.get("name")
+              for row in r:
+                  n=(row.get(nc) or "").strip()
+                  if n and n.lower() not in seen:
+                      seen.add(n.lower()); names.append(n)
+          # which are already in the cache?
+          def sq(s):
+              s=unicodedata.normalize("NFKD",str(s)).encode("ascii","ignore").decode().lower()
+              s=re.sub(r"[^a-z0-9 ]"," ",s)
+              s=re.sub(r"\b(ltd|limited|plc|llp|uk|holdings?|group|company|co|the|and)\b"," ",s)
+              return re.sub(r"\s+","",s)
+          have=set()
+          cache=pathlib.Path("ch_results_cache.jsonl")
+          if cache.exists():
+              for line in cache.open():
+                  if line.strip():
+                      r=json.loads(line)
+                      have.add(sq(r.get("company","")))
+          todo=[n for n in names if sq(n) not in have]
+          with open("_customs_todo.csv","w",encoding="utf-8-sig",newline="") as fh:
+              w=csv.writer(fh); w.writerow(["name"])
+              for n in todo: w.writerow([n])
+          print(f"{len(names)} companies, {len(todo)} not in cache and will be triaged")
+          PY
+          if [ -s _customs_todo.csv ] && [ $(wc -l < _customs_todo.csv) -gt 1 ]; then
+            python run_batch.py --input _customs_todo.csv --cache ch_results_cache.jsonl || true
+          else
+            echo "nothing new to triage"
+          fi
+
+      # Step 2: rank the whole customs universe, cached plus newly triaged.
+      - name: Build the customs call sheet
+        run: |
+          STAMP=$(date +%Y-%m-%d)
+          python build_customs_sheet_v2.py \
+            --customs "${{ steps.f.outputs.csv }}" \
+            --cache ch_results_cache.jsonl \
+            --out "customs_call_sheet_${STAMP}.csv"
+          # names-only list for Lusha, rank 1 and 2 only
+          python - <<'PY'
+          import csv, glob, re
+          latest=sorted(glob.glob("customs_call_sheet_*.csv"))[-1]
+          rows=[r for r in csv.DictReader(open(latest,encoding="utf-8-sig"))
+                if r["call_rank"] in ("1","2")]
+          def tidy(n):
+              n=re.sub(r"\s*\([^)]*\)","",n)
+              n=re.sub(r"\s*,?\s*(LIMITED|LTD|PLC|LLP)\.?$","",n,flags=re.I).strip(" .,")
+              return n.title() if n.isupper() else n
+          with open("customs_lusha.csv","w",encoding="utf-8-sig",newline="") as fh:
+              w=csv.writer(fh); w.writerow(["company"])
+              for r in rows: w.writerow([tidy(r["company"])])
+          print(f"{len(rows)} rank 1-2 companies written to customs_lusha.csv")
+          PY
+
+      - name: Commit the results
+        run: |
+          git config user.name "customs-bot"
+          git config user.email "actions@github.com"
+          git add customs_call_sheet_*.csv customs_lusha.csv ch_results_cache.jsonl
+          git commit -m "Customs leads run $(date +%Y-%m-%d)" || echo "nothing to commit"
+          git push || echo "nothing to push"
+
+      - name: Upload as artifact too
+        uses: actions/upload-artifact@v4
+        with:
+          name: customs-leads
+          path: |
+            customs_call_sheet_*.csv
+            customs_lusha.csv
