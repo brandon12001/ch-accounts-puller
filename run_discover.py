@@ -76,8 +76,27 @@ def accounts_size(number: str, session=None) -> tuple[str, bool]:
         return "", True                    # never let the screen kill a run
 
 
+# --------------------------------------------------------------------------
+# FX evidence gate
+#
+# Without this the run keeps every company that survives the size and parent
+# screens, and most of them never mention currency at all. That fills the call
+# sheet with UK-only businesses and spends a Lusha credit on each. A company
+# only earns a place if its own filing shows money crossing a border.
+# --------------------------------------------------------------------------
+
+# The FX gate lives in ch_classify so every tool shares one definition.
+try:
+    from ch_classify import fx_evidence
+except ImportError:                       # classifier missing, keep everything
+    def fx_evidence(res: dict) -> str:    # type: ignore[misc]
+        return "no classifier available"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Discover then triage UK companies")
+    ap.add_argument("--cva", action="store_true",
+                    help="find companies currently in a CVA instead of a vertical")
     ap.add_argument("--vertical", default="", help=f"one of: {', '.join(sorted(disc.VERTICALS))}")
     ap.add_argument("--sic", default="", help="comma separated SIC codes, instead of a vertical")
     ap.add_argument("--location", default="", help="town, city or region. Blank searches nationally")
@@ -93,15 +112,17 @@ def main() -> int:
     ap.add_argument("--triage-limit", type=int, default=0, help="cap how many get triaged")
     ap.add_argument("--all-sizes", action="store_true",
                     help="do not screen out small and micro filers before triage")
+    ap.add_argument("--keep-all", action="store_true",
+                    help="skip the FX screen and keep every company triaged")
     ap.add_argument("--keep-parents", action="store_true",
                     help="keep companies with a foreign or operating-group parent in the output")
     args = ap.parse_args()
 
     sic = [c.strip() for c in args.sic.split(",") if c.strip()]
-    if not sic and not args.vertical:
-        raise SystemExit("give --vertical or --sic")
+    if not args.cva and not sic and not args.vertical:
+        raise SystemExit("give --vertical, --sic, or --cva")
 
-    label = args.vertical or f"SIC {','.join(sic)}"
+    label = "companies in a CVA" if args.cva else (args.vertical or f"SIC {','.join(sic)}")
     where = args.location or "nationally"
     print(f"searching Companies House: {label}, {where}, "
           f"active, incorporated before {args.min_age} years ago", flush=True)
@@ -111,10 +132,19 @@ def main() -> int:
     # keep pulling pages until enough have passed the screen.
     want = args.max
     cap = args.search_cap or want * 12
-    raw = disc.discover(
-        vertical=args.vertical, sic_codes=sic or None, location=args.location,
-        max_results=cap if not args.all_sizes else want, min_age_years=args.min_age,
-    )
+    if args.cva:
+        # Companies in a live CVA, from the company_status filter. These are the
+        # ones banks often will not give a forward facility, which is exactly
+        # the segment Lumon's credit appetite is aimed at, so the usual
+        # winnability screen is deliberately skipped for this mode.
+        print("searching Companies House for companies in a live CVA", flush=True)
+        with requests.Session() as sess:
+            raw = disc.discover_cva(session=sess, max_results=cap)
+    else:
+        raw = disc.discover(
+            vertical=args.vertical, sic_codes=sic or None, location=args.location,
+            max_results=cap if not args.all_sizes else want, min_age_years=args.min_age,
+        )
     print(f"found {len(raw)} candidates", flush=True)
     if not raw:
         print("nothing returned. Check the location spelling, or widen the SIC codes.")
@@ -207,6 +237,30 @@ def main() -> int:
             mix = Counter(r.get("parent_control", "?") for r in blocked)
             print("\nparent screen dropped " + str(before - len(results)) + ": "
                   + ", ".join(f"{v} {k}" for k, v in mix.most_common()), flush=True)
+
+    # Keep only companies whose own filing shows currency crossing a border.
+    if not args.keep_all:
+        before = len(results)
+        kept, dropped = [], []
+        for r in results:
+            why = fx_evidence(r)
+            if why:
+                r["fx_evidence"] = why
+                kept.append(r)
+            else:
+                dropped.append(r)
+        results = kept
+        if dropped:
+            print(f"\nFX screen dropped {before - len(results)} of {before}: "
+                  f"no currency evidence in the filing", flush=True)
+            drop_path = args.out.with_name(args.out.stem + "_no_fx.csv")
+            cols = sorted({k for r in dropped for k in r})
+            with drop_path.open("w", encoding="utf-8-sig", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(dropped)
+            print(f"  the discards are in {drop_path} if a rule looks wrong",
+                  flush=True)
 
     if results:
         cols: list[str] = []
