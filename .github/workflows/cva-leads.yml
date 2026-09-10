@@ -1,10 +1,15 @@
 name: CVA leads
 
-# Companies currently in a Company Voluntary Arrangement, run through the FX
-# triage. These are businesses banks often will not give a forward facility,
-# which is the segment Lumon's credit appetite is aimed at, so the usual
-# winnability screen is deliberately skipped. The triage still runs, so you
-# only get CVA companies that also buy or sell in currency.
+# Companies in a live Company Voluntary Arrangement, ranked by a CVA-specific
+# engine. The trigger is the CVA itself: these are distressed businesses under
+# pressure to cut costs, and ones banks often will not give a forward facility
+# that Lumon can. The accounts rank and disqualify, they do not gate. This mode
+# is deliberately independent of the normal FX classifier so a future change to
+# ch_classify cannot collapse the callable list back to a handful.
+#
+# COMMERCIAL CHECK before working the list: confirm internally that Lumon can
+# onboard a company currently under a CVA, and on what credit or pre-funding
+# terms. That answer changes which of the callable names are worth the time.
 
 on:
   workflow_dispatch:
@@ -17,6 +22,10 @@ on:
         description: "Skip the paid AI brief (cheaper, less detail)"
         type: boolean
         default: false
+      include_rank_3_for_lusha:
+        description: "Put rank 3 (speculative, SIC-based) into the Lusha list too"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -33,12 +42,15 @@ jobs:
       - name: Install deps
         run: pip install requests
 
+      # 1-2: discovery. Produces cva_call_sheet_DATE.csv and its _no_fx.csv,
+      # which carries the full triaged record for every CVA company.
       - name: Discover and triage CVA companies
         env:
           CH_API_KEY: ${{ secrets.CH_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           STAMP=$(date +%Y-%m-%d)
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
           BRIEF=""
           if [ "${{ github.event.inputs.no_brief }}" = "true" ]; then BRIEF="--no-brief"; fi
           python run_discover.py --cva \
@@ -47,38 +59,56 @@ jobs:
             --out "cva_call_sheet_${STAMP}.csv" \
             $BRIEF
 
-      - name: Build the Lusha lookup list
+      # 3-4: rank with the CVA-specific engine, reading the _no_fx.csv which
+      # holds every triaged company, not just the 3 the FX gate let through.
+      - name: Rank with the CVA engine
+        run: |
+          NOFX="cva_call_sheet_${STAMP}_no_fx.csv"
+          if [ ! -f "$NOFX" ]; then
+            echo "no _no_fx file found, nothing to rank"; exit 0
+          fi
+          python build_cva_sheet.py --infile "$NOFX" --out "cva_ranked_${STAMP}.csv"
+
+      # 5: Lusha list, rank 2 always, rank 3 only if the box is ticked.
+      - name: Build the Lusha list and print the summary
         run: |
           python - <<'PY'
-          import csv, glob, re
-          sheets=sorted(glob.glob("cva_call_sheet_*.csv"))
-          if not sheets:
-              print("no call sheet produced"); raise SystemExit(0)
-          latest=sheets[-1]
-          rows=[r for r in csv.DictReader(open(latest,encoding="utf-8-sig"))
-                if r.get("call_rank") in ("1","2","3")]
+          import csv, glob, re, os
+          ranked=sorted(glob.glob("cva_ranked_*.csv"))
+          if not ranked:
+              print("no ranked file produced"); raise SystemExit(0)
+          rows=list(csv.DictReader(open(ranked[-1], encoding="utf-8-sig")))
+          from collections import Counter
+          c=Counter(r["call_rank"] for r in rows)
+          r2, r3, cut = c.get("2",0), c.get("3",0), c.get("4",0)
+          callable_=r2+r3+c.get("1",0)
+          print(f"{len(rows)} total | {c.get('1',0)} rank 1 | {r2} rank 2 | {r3} rank 3 | {cut} cut | {callable_} callable")
+          want3 = "${{ github.event.inputs.include_rank_3_for_lusha }}" == "true"
+          wanted = [r for r in rows if r["call_rank"] in (("1","2","3") if want3 else ("1","2"))]
           def tidy(n):
               n=re.sub(r"\s*\([^)]*\)","",n)
               n=re.sub(r"\s*,?\s*(LIMITED|LTD|PLC|LLP)\.?$","",n,flags=re.I).strip(" .,")
               return n.title() if n.isupper() else n
           with open("cva_lusha.csv","w",encoding="utf-8-sig",newline="") as fh:
               w=csv.writer(fh); w.writerow(["company"])
-              for r in rows: w.writerow([tidy(r["company"])])
-          print(f"{len(rows)} callable CVA companies written to cva_lusha.csv")
+              for r in wanted: w.writerow([tidy(r["company"])])
+          print(f"cva_lusha.csv: {len(wanted)} companies "
+                f"({'rank 2 and 3' if want3 else 'rank 2 only'})")
           PY
 
+      # 6: commit and upload
       - name: Commit the results
         run: |
           git config user.name "cva-bot"
           git config user.email "actions@github.com"
-          git add cva_call_sheet_*.csv cva_discovered_*.csv cva_lusha.csv ch_results_cache.jsonl 2>/dev/null || true
-          git commit -m "CVA leads run $(date +%Y-%m-%d)" || echo "nothing to commit"
+          git add cva_ranked_*.csv cva_lusha.csv cva_call_sheet_*.csv cva_discovered_*.csv ch_results_cache.jsonl 2>/dev/null || true
+          git commit -m "CVA leads run ${STAMP}" || echo "nothing to commit"
           git push || echo "nothing to push"
 
-      - name: Upload as artifact
+      - name: Upload as artifacts
         uses: actions/upload-artifact@v4
         with:
           name: cva-leads
           path: |
-            cva_call_sheet_*.csv
+            cva_ranked_*.csv
             cva_lusha.csv
