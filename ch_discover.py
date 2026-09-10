@@ -267,6 +267,54 @@ def discover(
     return out
 
 
+def discover_cva(session=None, max_results: int = 600) -> list[dict]:
+    """Every live company in a CVA, straight from the company_status filter.
+
+    Companies House tags a company in a company voluntary arrangement with
+    company_status = "voluntary-arrangement". No filing-history parsing needed:
+    the status flips on when the CVA1 is registered and off again when it
+    completes or the company is wound up, so a status search returns exactly
+    the companies currently in an arrangement.
+
+    Brandon's angle here is the reverse of the usual triage. These companies
+    often cannot get a forward facility from a bank, and Lumon's credit appetite
+    is the selling point. So this deliberately ignores the winnability screen
+    that the normal pipeline applies, and hands the survivors to the FX triage
+    only to check whether there is any currency exposure worth a call.
+    """
+    out, start = [], 0
+    while len(out) < max_results:
+        params = {
+            "size": 100, "start_index": start,
+            "company_status": "voluntary-arrangement",
+        }
+        get = (session or requests).get
+        r = get(f"{BASE}/advanced-search/companies", params=params,
+                auth=(_key(), ""), timeout=30)
+        if r.status_code != 200:
+            break
+        items = r.json().get("items", []) or []
+        if not items:
+            break
+        for item in items:
+            addr = item.get("registered_office_address", {}) or {}
+            out.append({
+                "name": item.get("company_name", ""),
+                "number": item.get("company_number", ""),
+                "status": item.get("company_status", ""),
+                "incorporated": item.get("date_of_creation", ""),
+                "sic_codes": ", ".join(item.get("sic_codes", []) or []),
+                "locality": addr.get("locality", ""),
+                "postcode": addr.get("postal_code", ""),
+                "region": addr.get("region", ""),
+                "in_cva": True,
+            })
+        start += 100
+        if start >= 5000:
+            break
+    return out[:max_results]
+
+
 def write_run_list(rows: list[dict], path: str | Path, include_detail: bool = True) -> Path:
     """Write a CSV the puller can read. `name` first so the existing loader works."""
     p = Path(path)
