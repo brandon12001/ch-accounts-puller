@@ -160,7 +160,11 @@ def main() -> int:
             print(f"dropping {before - len(rows)} already in the cache", flush=True)
 
     # Size screen. One profile call each, no documents, no credits.
-    if not args.all_sizes:
+    # Skipped in CVA mode: a company in an arrangement is distressed and often
+    # small, the very thing this screen exists to drop, so screening here would
+    # empty the list. The FX triage still runs, so we only keep the CVA
+    # companies that actually buy or sell in currency.
+    if not args.all_sizes and not args.cva:
         kept, dropped = [], {}
         with requests.Session() as sess:
             for i, r in enumerate(rows, 1):
