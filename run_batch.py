@@ -42,7 +42,15 @@ def read_input(path: Path) -> list[dict]:
         if "name" not in fields:
             raise SystemExit(f"{path} needs a 'name' column, found: {reader.fieldnames}")
         for row in reader:
-            clean = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+            clean = {}
+            for k, v in row.items():
+                key = (k or "").strip().lower()
+                # An unescaped comma in a company name gives DictReader more
+                # values than headers, and the extras arrive as a list under a
+                # None key. Rejoin them so the name survives intact.
+                if isinstance(v, list):
+                    v = ",".join(x for x in v if x)
+                clean[key] = (v or "").strip()
             if clean.get("name"):
                 rows.append({"name": clean["name"], "number": clean.get("number", "")})
     return rows
