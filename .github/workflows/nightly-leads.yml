@@ -25,10 +25,14 @@ name: Nightly lead run
 #   Do not raise max-parallel without a second CH key.
 
 on:
-  schedule:
-    # 22:00 UTC Sunday to Thursday, so a long run still finishes overnight.
-    # GitHub caps any single job at six hours regardless of when it starts.
-    - cron: "0 22 * * 0-4"
+  # PAUSED 14/09/2026. The twelve original verticals are worked out: recent
+  # nightly runs returned two or three callable companies for a full night of
+  # API reads. Customs mode is the primary engine now. To resume the nightly
+  # sweep, uncomment the schedule block below. Manual runs still work any time
+  # via "Run workflow" (workflow_dispatch), e.g. to sweep a newly added vertical.
+  #
+  # schedule:
+  #   - cron: "0 22 * * 0-4"
   workflow_dispatch:
     inputs:
       max_results:
